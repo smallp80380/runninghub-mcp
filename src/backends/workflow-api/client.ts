@@ -1,12 +1,14 @@
+import { createHash } from "node:crypto";
 import { parse as parseLossless } from "lossless-json";
 import { AppError } from "../../errors.js";
-import { SubmitUnknownError, type ProviderAssetReference, type ProviderOutput, type ProviderStatus, type ProviderUploadInput, type WorkflowBackend } from "../../execution/types.js";
+import { SubmitUnknownError, type ProviderAssetReference, type ProviderLoraReference, type ProviderLoraUploadInput, type ProviderOutput, type ProviderStatus, type ProviderUploadInput, type WorkflowBackend } from "../../execution/types.js";
 
 export interface WorkflowApiRoutes {
   readonly submit: string;
   readonly status: string;
   readonly outputs: string;
   readonly upload?: string;
+  readonly lora_upload_url?: string;
   readonly cancel?: string;
 }
 
@@ -142,6 +144,25 @@ export class WorkflowApiClient implements WorkflowBackend {
     throw new AppError("PROVIDER_ERROR", "Workflow API upload response did not contain a tagged provider file or URL.", { recoverable: true });
   }
 
+  async uploadLora(input: ProviderLoraUploadInput): Promise<ProviderLoraReference> {
+    if (!this.options.routes.lora_upload_url) {
+      throw new AppError("CAPABILITY_UNSUPPORTED", "Workflow API LoRA upload route is not configured.", { recoverable: true });
+    }
+    const md5Hex = createHash("md5").update(input.bytes).digest("hex");
+    const loraName = input.filename.replace(/\.[^/.]+$/, "");
+    const response = await this.request(this.options.routes.lora_upload_url, { loraName, md5Hex });
+    const body = await this.body(response);
+    const applicationError = errorFromBody(body);
+    if (applicationError) throw new AppError("PROVIDER_ERROR", applicationError, { recoverable: false });
+    const fileName = pathValue(body, ["data", "fileName"]) ?? pathValue(body, ["data", "filename"]);
+    const uploadUrl = pathValue(body, ["data", "url"]);
+    if (typeof fileName !== "string" || !fileName.trim() || typeof uploadUrl !== "string" || !uploadUrl.trim()) {
+      throw new AppError("PROVIDER_ERROR", "Workflow API LoRA response did not contain fileName and upload URL.", { recoverable: true });
+    }
+    await this.putSignedLora(uploadUrl, input.bytes);
+    return { kind: "provider_lora", value: fileName };
+  }
+
   async status(taskId: string): Promise<ProviderStatus> {
     const response = await this.request(this.options.routes.status, { taskId });
     const body = await this.body(response);
@@ -228,6 +249,34 @@ export class WorkflowApiClient implements WorkflowBackend {
     } catch (error) {
       if (error instanceof AppError) throw error;
       throw new AppError("PROVIDER_ERROR", error instanceof Error ? error.message : "Workflow API upload failed.", { recoverable: true, context: { outcome: "unknown" } });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async putSignedLora(uploadUrl: string, bytes: Uint8Array): Promise<void> {
+    let url: URL;
+    try {
+      url = new URL(uploadUrl);
+    } catch {
+      throw new AppError("PROVIDER_ERROR", "Workflow API returned an invalid LoRA upload URL.", { recoverable: false });
+    }
+    if (url.protocol !== "https:") {
+      throw new AppError("PROVIDER_ERROR", "Workflow API LoRA upload URL must use HTTPS.", { recoverable: false });
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(1, this.options.timeout_ms ?? 30_000));
+    try {
+      const response = await this.fetchImpl(url.toString(), {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: new Blob([bytes], { type: "application/octet-stream" }),
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new AppError("PROVIDER_ERROR", `Workflow API LoRA upload HTTP ${response.status}.`, { recoverable: response.status === 429 || response.status >= 500 });
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError("PROVIDER_ERROR", error instanceof Error ? error.message : "Workflow API LoRA upload failed.", { recoverable: true, context: { outcome: "unknown" } });
     } finally {
       clearTimeout(timeout);
     }

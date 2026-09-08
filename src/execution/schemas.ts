@@ -61,3 +61,10 @@ export const assetToolSchema = {
   work_item_id: z.string().min(1).optional(),
   backend_profile_id: z.string().min(1).optional(),
 };
+
+export const uploadLoraSchema = {
+  project_id: z.string().min(1),
+  asset_id: z.string().min(1),
+  work_item_id: z.string().min(1),
+  backend_profile_id: z.string().min(1).optional(),
+};

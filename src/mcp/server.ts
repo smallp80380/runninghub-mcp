@@ -8,13 +8,14 @@ import { z } from "zod";
 import { WorkflowApiClient } from "../backends/workflow-api/client.js";
 import { type AppConfig } from "../config.js";
 import { AssetProvider } from "../execution/assets.js";
+import { isLoraAsset, validateLoraGraphBindings } from "../execution/lora.js";
 import { DerivedMediaService, type DerivedResult } from "../execution/derivatives.js";
 import { ResultManifestService } from "../execution/manifests.js";
 import { ResultDownloadService } from "../execution/results.js";
 import { ReviewService } from "../execution/reviews.js";
 import { type ExecutionPlan } from "../execution/types.js";
 import { jobHandle, planFromRow, planToRow, DurableWorkflowRunner } from "../execution/runner.js";
-import { assetToolSchema, getResultsSchema, jobSchema, prepareGenerationSchema, reviewResultSchema, runWorkflowSchema } from "../execution/schemas.js";
+import { assetToolSchema, getResultsSchema, jobSchema, prepareGenerationSchema, reviewResultSchema, runWorkflowSchema, uploadLoraSchema } from "../execution/schemas.js";
 import { AppError, errorResult, jsonText, okResult } from "../errors.js";
 import { exportApiGraph, importApiGraph } from "../graph/codec.js";
 import { type GraphOperation } from "../graph/operations.js";
@@ -261,7 +262,11 @@ function executionPlanForInput(
     if (asset.content_hash.toLowerCase() !== binding.content_hash.toLowerCase()) {
       throw new AppError("ASSET_CHANGED", `Asset ${binding.asset_id} hash no longer matches the requested binding.`, { recoverable: true, suggestedFix: "Re-index the project and prepare a new plan with the current asset hash." });
     }
+    if (isLoraAsset(asset) && binding.provider_ref) {
+      throw new AppError("INVALID_CONFIGURATION", `LoRA asset ${asset.id} cannot use a regular provider reference in an execution plan.`, { recoverable: true, suggestedFix: "Use rh_upload_lora or let rh_run_workflow resolve the dedicated LoRA reference." });
+    }
   }
+  validateLoraGraphBindings(revision.graph, assets);
   const requirements = {
     work_item_id: workItem.id,
     project_id: workItem.project_id,
@@ -527,6 +532,28 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
         if (workItem.project_id !== input.project_id) throw new AppError("ASSET_MISSING", "The work item does not belong to the asset project.", { recoverable: true });
         const backend = configuredWorkflowBackend(config, profileId);
         const reference = await assetProvider.upload({ project_id: input.project_id, asset_id: asset.id, content_hash: asset.content_hash, profile_id: profileId, backend });
+        return { content: [jsonText(okResult({ asset, provider_reference: reference }))] };
+      } catch (error) {
+        return { isError: true, content: [jsonText(errorResult(error))] };
+      }
+    },
+  );
+
+  server.tool(
+    "rh_upload_lora",
+    "Upload one registered project LoRA through the dedicated RHLoraLoader flow; signed upload URLs are never returned or stored as graph references.",
+    uploadLoraSchema,
+    async (input) => {
+      try {
+        const asset = assetProvider.inspect(input.project_id, input.asset_id);
+        if (Array.isArray(asset)) throw new Error("Expected one asset");
+        const workItem = projects.getWorkItem(input.work_item_id);
+        if (workItem.project_id !== input.project_id) throw new AppError("ASSET_MISSING", "The work item does not belong to the LoRA asset project.", { recoverable: true });
+        if (workItem.state !== "REQUESTED") throw new AppError("INVALID_CONFIGURATION", `Work item ${workItem.id} is not open for LoRA upload.`, { recoverable: true });
+        if (!isLoraAsset(asset)) throw new AppError("INVALID_CONFIGURATION", `Asset ${asset.id} is not registered with the lora role.`, { recoverable: true });
+        const profileId = input.backend_profile_id ?? projects.getProject(input.project_id).backend_profile_id;
+        const backend = configuredWorkflowBackend(config, profileId);
+        const reference = await assetProvider.uploadLora({ project_id: input.project_id, asset_id: asset.id, content_hash: asset.content_hash, profile_id: profileId, backend });
         return { content: [jsonText(okResult({ asset, provider_reference: reference }))] };
       } catch (error) {
         return { isError: true, content: [jsonText(errorResult(error))] };

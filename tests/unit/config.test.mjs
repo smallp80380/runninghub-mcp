@@ -20,6 +20,7 @@ test("Workflow API uses built-in official routes and only reads the API key", ()
     status: "/openapi/v2/query",
     outputs: "/openapi/v2/query",
     upload: "/openapi/v2/media/upload/binary",
+    lora_upload_url: "/api/openapi/getLoraUploadUrl",
     cancel: "/task/openapi/cancel",
   });
 });

@@ -18,10 +18,11 @@
     "test:graph": "npm run build && node --test tests/graph/*.test.mjs",
     "test:l03": "npm run build && node --test tests/catalog/*.test.mjs",
     "test:l04": "npm run build && node --test tests/projects/*.test.mjs",
-    "test:l05": "npm run build && node --test tests/execution/*.test.mjs",
+    "test:l05": "npm run build && node --test tests/execution/l05.test.mjs",
     "test:l06": "npm run build && node --test tests/results/*.test.mjs",
+    "test:l07": "npm run build && node --test tests/execution/l07.test.mjs",
     "test:mcp": "npm run build && node --test tests/mcp/*.test.mjs",
-    "test:acceptance:offline": "npm run test:unit && npm run test:contract && npm run test:graph && npm run test:l03 && npm run test:l04 && npm run test:l05 && npm run test:l06 && npm run test:mcp",
+    "test:acceptance:offline": "npm run test:unit && npm run test:contract && npm run test:graph && npm run test:l03 && npm run test:l04 && npm run test:l05 && npm run test:l06 && npm run test:l07 && npm run test:mcp",
     "test:live": "node scripts/test-live.mjs",
     "start": "node dist/index.js"
   },

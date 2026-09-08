@@ -225,6 +225,22 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    id: 8,
+    sql: `
+      CREATE TABLE IF NOT EXISTS lora_uploads (
+        profile_id TEXT NOT NULL,
+        api_family TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        provider_kind TEXT NOT NULL,
+        provider_value TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (profile_id, api_family, content_hash)
+      );
+    `,
+  },
 ] as const;
 
 export interface WorkflowRevisionRow {
@@ -292,6 +308,17 @@ export interface ProviderUploadRow {
   readonly asset_id: string;
   readonly content_hash: string;
   readonly mime: string;
+  readonly provider_kind: string;
+  readonly provider_value: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface LoraUploadRow {
+  readonly profile_id: string;
+  readonly api_family: string;
+  readonly asset_id: string;
+  readonly content_hash: string;
   readonly provider_kind: string;
   readonly provider_value: string;
   readonly created_at: string;
@@ -555,6 +582,25 @@ export class Storage {
       .run(row.profile_id, row.api_family, row.asset_id, row.content_hash, row.mime, row.provider_kind, row.provider_value, row.created_at, row.updated_at);
     const stored = this.getProviderUpload(row.profile_id, row.api_family, row.asset_id, row.content_hash);
     if (!stored) throw new Error(`Provider upload ${row.asset_id} was not persisted`);
+    return stored;
+  }
+
+  getLoraUpload(profileId: string, apiFamily: string, contentHash: string): LoraUploadRow | undefined {
+    return this.db
+      .prepare("SELECT * FROM lora_uploads WHERE profile_id = ? AND api_family = ? AND content_hash = ?")
+      .get(profileId, apiFamily, contentHash) as unknown as LoraUploadRow | undefined;
+  }
+
+  saveLoraUpload(row: LoraUploadRow): LoraUploadRow {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO lora_uploads
+          (profile_id, api_family, asset_id, content_hash, provider_kind, provider_value, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.profile_id, row.api_family, row.asset_id, row.content_hash, row.provider_kind, row.provider_value, row.created_at, row.updated_at);
+    const stored = this.getLoraUpload(row.profile_id, row.api_family, row.content_hash);
+    if (!stored) throw new Error(`LoRA upload ${row.asset_id} was not persisted`);
     return stored;
   }
 

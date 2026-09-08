@@ -1,8 +1,9 @@
 import { AppError } from "../errors.js";
-import { Storage, type ExecutionPlanRow, type JobRow } from "../storage/database.js";
+import { Storage, type AssetRow, type ExecutionPlanRow, type JobRow } from "../storage/database.js";
 import { stringify as stringifyLossless, parse as parseLossless } from "lossless-json";
 import { AssetProvider } from "./assets.js";
-import { type ExecutionPlan, type JobHandle, type ProviderAssetReference, type ProviderOutput, type WorkflowBackend } from "./types.js";
+import { isLoraAsset, validateLoraApiBindings } from "./lora.js";
+import { type ExecutionPlan, type JobHandle, type ProviderAssetReference, type ProviderLoraReference, type ProviderOutput, type WorkflowBackend } from "./types.js";
 
 export function planToRow(plan: ExecutionPlan, createdAt = new Date().toISOString()): ExecutionPlanRow {
   return {
@@ -182,8 +183,22 @@ export class DurableWorkflowRunner {
   }
 
   private async resolveProviderWorkflow(plan: ExecutionPlan): Promise<string> {
+    let parsed: unknown;
+    try {
+      parsed = parseLossless(plan.workflow_json);
+    } catch {
+      throw new AppError("INVALID_GRAPH", "The immutable workflow snapshot is not valid JSON.", { recoverable: false });
+    }
+    const assetRows = new Map((this.assets.inspect(plan.project_id) as AssetRow[]).map((asset) => [asset.id, asset]));
+    const loraAssetIds = validateLoraApiBindings(parsed, assetRows);
+    const boundAssetIds = new Set(plan.asset_bindings.map((binding) => binding.asset_id));
+    for (const assetId of loraAssetIds) {
+      if (!boundAssetIds.has(assetId)) {
+        throw new AppError("ASSET_MISSING", `LoRA asset ${assetId} is referenced by the workflow but is not bound to the execution plan.`, { recoverable: true });
+      }
+    }
     if (!plan.asset_bindings.length) return plan.workflow_json;
-    const references = new Map<string, ProviderAssetReference>();
+    const references = new Map<string, ProviderAssetReference | ProviderLoraReference>();
     for (const binding of plan.asset_bindings) {
       const previous = references.get(binding.asset_id);
       if (previous) {
@@ -193,23 +208,22 @@ export class DurableWorkflowRunner {
         this.assets.read(plan.project_id, binding.asset_id, binding.content_hash);
         continue;
       }
-      const providerRef = binding.provider_ref ?? await this.assets.upload({
-        project_id: plan.project_id,
-        asset_id: binding.asset_id,
-        content_hash: binding.content_hash,
-        profile_id: plan.backend_profile_id,
-        backend: this.backend,
-      });
+      const asset = assetRows.get(binding.asset_id);
+      const providerRef = asset && isLoraAsset(asset)
+        ? binding.provider_ref
+          ? (() => { throw new AppError("INVALID_CONFIGURATION", `LoRA asset ${binding.asset_id} cannot use a regular provider reference.`, { recoverable: true }); })()
+          : await this.assets.uploadLora({ project_id: plan.project_id, asset_id: binding.asset_id, content_hash: binding.content_hash, profile_id: plan.backend_profile_id, backend: this.backend })
+        : binding.provider_ref ?? await this.assets.upload({
+            project_id: plan.project_id,
+            asset_id: binding.asset_id,
+            content_hash: binding.content_hash,
+            profile_id: plan.backend_profile_id,
+            backend: this.backend,
+          });
       if (binding.provider_ref) this.assets.read(plan.project_id, binding.asset_id, binding.content_hash);
       references.set(binding.asset_id, providerRef);
     }
 
-    let parsed: unknown;
-    try {
-      parsed = parseLossless(plan.workflow_json);
-    } catch {
-      throw new AppError("INVALID_GRAPH", "The immutable workflow snapshot is not valid JSON.", { recoverable: false });
-    }
     const replace = (value: unknown): unknown => {
       if (typeof value === "string" && value.startsWith("asset://")) {
         const binding = plan.asset_bindings.find((candidate) => value.startsWith(`asset://${candidate.asset_id}/`));

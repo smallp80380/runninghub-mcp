@@ -6,6 +6,8 @@ export type ProviderAssetReference =
   | { readonly kind: "provider_file"; readonly value: string }
   | { readonly kind: "provider_url"; readonly value: string };
 
+export type ProviderLoraReference = { readonly kind: "provider_lora"; readonly value: string };
+
 export interface AssetBinding {
   readonly asset_id: string;
   readonly content_hash: string;
@@ -61,10 +63,19 @@ export interface ProviderUploadInput {
   readonly bytes: Uint8Array;
 }
 
+export interface ProviderLoraUploadInput {
+  readonly asset_id: string;
+  readonly content_hash: string;
+  readonly filename: string;
+  readonly mime: string;
+  readonly bytes: Uint8Array;
+}
+
 export interface WorkflowBackend {
   readonly profile_id: string;
   readonly api_family: "workflow_api" | "comfy_proxy" | "synthetic";
   upload(input: ProviderUploadInput): Promise<ProviderAssetReference>;
+  uploadLora?(input: ProviderLoraUploadInput): Promise<ProviderLoraReference>;
   submit(input: { readonly workflow_json: string; readonly plan_id: string; readonly workflow_id?: string }): Promise<{ task_id: string; raw?: unknown }>;
   status(taskId: string): Promise<ProviderStatus>;
   outputs(taskId: string): Promise<ProviderOutput>;

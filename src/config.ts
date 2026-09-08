@@ -9,6 +9,7 @@ export const RUNNINGHUB_WORKFLOW_API_ROUTES: WorkflowApiRoutes = {
   status: "/openapi/v2/query",
   outputs: "/openapi/v2/query",
   upload: "/openapi/v2/media/upload/binary",
+  lora_upload_url: "/api/openapi/getLoraUploadUrl",
   cancel: "/task/openapi/cancel",
 };
 

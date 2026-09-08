@@ -3,7 +3,8 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { basename, relative, resolve, sep } from "node:path";
 import { AppError } from "../errors.js";
 import { Storage, type AssetRow } from "../storage/database.js";
-import type { ProviderAssetReference, ProviderUploadInput, WorkflowBackend } from "./types.js";
+import { isLoraAsset } from "./lora.js";
+import type { ProviderAssetReference, ProviderLoraReference, ProviderUploadInput, WorkflowBackend } from "./types.js";
 
 export interface LocalAssetBytes {
   readonly row: AssetRow;
@@ -21,6 +22,13 @@ function providerReference(row: { readonly provider_kind: string; readonly provi
     return { kind: row.provider_kind, value: row.provider_value };
   }
   throw new AppError("PROVIDER_ERROR", "Cached provider upload has an invalid tagged reference.", { recoverable: true });
+}
+
+function providerLoraReference(row: { readonly provider_kind: string; readonly provider_value: string }): ProviderLoraReference {
+  if (row.provider_kind === "provider_lora" && row.provider_value.trim()) {
+    return { kind: "provider_lora", value: row.provider_value };
+  }
+  throw new AppError("PROVIDER_ERROR", "Cached provider LoRA upload has an invalid tagged reference.", { recoverable: true });
 }
 
 export class AssetProvider {
@@ -72,6 +80,9 @@ export class AssetProvider {
       throw new AppError("CAPABILITY_UNKNOWN", `Asset upload profile ${input.profile_id} does not match backend ${input.backend.profile_id}.`, { recoverable: true });
     }
     const local = this.read(input.project_id, input.asset_id, input.content_hash);
+    if (isLoraAsset(local.row)) {
+      throw new AppError("CAPABILITY_UNSUPPORTED", "LoRA assets require the dedicated rh_upload_lora flow and RHLoraLoader binding.", { recoverable: true });
+    }
     const cached = this.storage.getProviderUpload(input.profile_id, input.backend.api_family, input.asset_id, input.content_hash);
     if (cached) return providerReference(cached);
     if (typeof input.backend.upload !== "function") {
@@ -100,5 +111,48 @@ export class AssetProvider {
       updated_at: now,
     });
     return providerReference(stored);
+  }
+
+  async uploadLora(input: {
+    readonly project_id: string;
+    readonly asset_id: string;
+    readonly content_hash: string;
+    readonly profile_id: string;
+    readonly backend: WorkflowBackend;
+  }): Promise<ProviderLoraReference> {
+    if (input.backend.profile_id !== input.profile_id) {
+      throw new AppError("CAPABILITY_UNKNOWN", `LoRA upload profile ${input.profile_id} does not match backend ${input.backend.profile_id}.`, { recoverable: true });
+    }
+    const local = this.read(input.project_id, input.asset_id, input.content_hash);
+    if (!isLoraAsset(local.row)) {
+      throw new AppError("INVALID_CONFIGURATION", `Asset ${input.asset_id} is not registered with the lora role.`, { recoverable: true, suggestedFix: "Register the LoRA asset with role lora before uploading it." });
+    }
+    const cached = this.storage.getLoraUpload(input.profile_id, input.backend.api_family, input.content_hash);
+    if (cached) return providerLoraReference(cached);
+    if (typeof input.backend.uploadLora !== "function") {
+      throw new AppError("CAPABILITY_UNSUPPORTED", "The selected backend does not support the dedicated LoRA upload flow.", { recoverable: true });
+    }
+    const uploaded = await input.backend.uploadLora({
+      asset_id: input.asset_id,
+      content_hash: input.content_hash,
+      filename: local.filename,
+      mime: local.row.mime,
+      bytes: local.bytes,
+    });
+    if (uploaded.kind !== "provider_lora" || !uploaded.value.trim()) {
+      throw new AppError("PROVIDER_ERROR", "Provider returned an invalid tagged LoRA reference.", { recoverable: true });
+    }
+    const now = new Date().toISOString();
+    const stored = this.storage.saveLoraUpload({
+      profile_id: input.profile_id,
+      api_family: input.backend.api_family,
+      asset_id: input.asset_id,
+      content_hash: input.content_hash,
+      provider_kind: uploaded.kind,
+      provider_value: uploaded.value,
+      created_at: now,
+      updated_at: now,
+    });
+    return providerLoraReference(stored);
   }
 }

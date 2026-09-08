@@ -40,6 +40,7 @@ Statuses are factual. `NOT_RUN` is not a pass and does not prove backend compati
 | L05-LIVE-004 | Authorized ephemeral structurally changed graph executes and returns outputs | live | PASS | `scripts/test-live.mjs --structural-graph`, `PROGRESS.md` STEP-0061 | One workflow/node/profile only; output readiness was confirmed, but output dimensions and account-wide compatibility were not measured |
 | L05-LIVE-005 | Authorized ephemeral Workflow API task is cancelled through the durable runner | live | PASS | `scripts/test-live.mjs --cancel`, `PROGRESS.md` STEP-0067 | One workflow/profile only; provider cancel response confirmed `CANCELLED`, without account-wide compatibility or natural expiry evidence |
 | L05-LIVE-006 | Authorized read-only unknown-task status reconciles explicit provider not-found/expiry marker | live | PASS | `scripts/test-live.mjs --expiry --task-id 9223372036854775807`, `PROGRESS.md` STEP-0088 | One profile and one unknown task ID; natural expiry of an existing task remains unverified |
+| L07-LORA-001 | Dedicated LoRA upload/cache and `RHLoraLoader` binding | synthetic_contract | PASS | `tests/execution/l07.test.mjs`, `tests/unit/storage.test.mjs` | MD5/get-upload-URL/signed PUT and profile-scoped `fileName` cache are offline-only; real profile LoRA availability and signed URL expiry remain NOT_RUN |
 
 ## Evidence policy
 

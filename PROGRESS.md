@@ -10,7 +10,7 @@
 - L00–L04: `LOCAL_DONE`.
 - L05: `LIVE_PENDING`. Durable execution, recovery, upload/cache, status/output/cancel и structural graph flow реализованы; scoped live evidence получена для submit/status/output/upload/structural graph/cancel, active workflow и unknown-task not-found reconciliation.
 - L06: `LOCAL_DONE` для локального review loop. Result download, MCP resource links, local derived image preview/video poster, manifests/outbox, review events/manifest review state, changes-requested revision/work item, chain gate и явно запрошенный approval continuation — `LOCAL_DONE`; read-only live result/resource verification — `PASS`. Независимое automatic approval не реализуется.
-- L07: `TODO` — LoRA upload/bindings, media rules, cache expiry и server instructions.
+- L07: `IN_PROGRESS` — LoRA upload/bindings `LOCAL_DONE`; media rules, cache expiry и server instructions остаются `TODO`.
 - L08: `TODO` — финальная live acceptance и проверка поставки.
 
 ## Что Проверено
@@ -31,8 +31,8 @@
 
 ## Handoff
 
-- Текущий пакет: L06 / `LOCAL_DONE` для explicit approval continuation; automatic approval остаётся намеренно неподдержанным.
-- Следующий шаг: в новой отдельной задаче выбрать следующий пункт по handoff; автоматически не начинать L07/L08.
+- Текущий пакет: L07 / `LOCAL_DONE` для LoRA upload/bindings; media rules, cache expiry и server instructions ещё не начинались.
+- Следующий шаг: в новой отдельной задаче выбрать один оставшийся L07 подпункт; L08 и остальные L07 подпункты автоматически не начинать.
 - Последний commit реализации: `ed648c2` (`Add L06 manifests and outbox`).
 
 ### STEP-0172 — 2026-09-07 — compact active progress journal
@@ -585,3 +585,120 @@
 - Проверки: первый task — image 642586 bytes, video 5.0625 s / 576x832 (1088469 bytes), ZIP с PNG 11661 bytes; второй task — video 8 s / 1280x736 с AAC audio (3578694 bytes); `ffprobe` и `ffmpeg` first-frame extraction — `PASS`. Новые submit, upload пользовательских данных и внешние изменения — `NOT_RUN`.
 - Ограничения/остаток: визуально показаны representative image/frames, а не полный просмотр движения видео; natural expiry и полная account-wide compatibility остаются `NOT_RUN`.
 - Следующий шаг: остановиться на завершённом выбранном scope; новые live calls не запускать автоматически.
+
+### STEP-0234 — 2026-09-07 — выбран L07 LoRA upload/bindings
+
+- Пакет и статус: L07 / `IN_PROGRESS`; выбран только конкретный подпункт LoRA upload adapter и `RHLoraLoader` binding. Media rules, cache expiry, server instructions и L08 не начинаются.
+- Основание: актуальный handoff после STEP-0233 требует в новой отдельной задаче выбрать следующий пункт; официальный контракт LoRA задаёт отдельный upload URL flow, MD5-кэширование и `fileName` только для `RHLoraLoader`.
+- Файлы/модули: перед реализацией затронут только `PROGRESS.md`; исходные контракты проверены в `RUNNINGHUB_MCP_IMPLEMENTATION_PLAN.md`, `src/backends/workflow-api/client.ts`, `src/execution/assets.ts`, `src/execution/runner.ts`, `src/storage/database.ts`, `src/mcp/server.ts` и `data/upstream/rh-api-contract.md`.
+- Проверки: чтение официальной документации LoRA — `PASS`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN` по правилу сессии.
+- Ограничения/остаток: реализация и offline regression ещё не выполнены; signed URL не будет сохраняться или переиспользоваться как графовый reference.
+- Следующий шаг: добавить отдельный Workflow API LoRA adapter, tagged cache/reference и MCP tool с offline tests.
+
+### STEP-0235 — 2026-09-07 — добавлен LoRA upload/binding core
+
+- Пакет и статус: L07 / `IN_PROGRESS`; core подпункт реализован, regression и документационная синхронизация ещё не выполнены.
+- Изменения и назначение: добавлены `provider_lora`, официальный двухфазный `getLoraUploadUrl` + signed `PUT`, MD5 расчёт, отдельная migration 8/cache, `AssetProvider.uploadLora`, `rh_upload_lora` и runtime substitution `fileName`. LoRA assets требуют роль `lora`, не проходят через обычный media upload и валидируются только на `RHLoraLoader`; regular signed URLs не сохраняются.
+- Файлы/модули: `src/execution/types.ts`, `src/execution/lora.ts`, `src/execution/assets.ts`, `src/execution/runner.ts`, `src/backends/workflow-api/client.ts`, `src/config.ts`, `src/storage/database.ts`, `src/execution/schemas.ts`, `src/mcp/server.ts`.
+- Проверки: typecheck/build/tests — `NOT_RUN`, следующий шаг после core edit; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: signed URL expiry policy, media limits, agent instructions и live LoRA acceptance не входят в этот подпункт и остаются TODO/`NOT_RUN`.
+- Следующий шаг: добавить offline LoRA contract tests; typecheck уже подтверждён.
+
+### STEP-0236 — 2026-09-07 — LoRA core typecheck PASS
+
+- Пакет и статус: L07 / `IN_PROGRESS`; core компилируется, offline regression ещё не добавлена.
+- Изменения и назначение: подтверждён TypeScript контракт отдельного LoRA adapter/cache/binding path после core edit; compile issues не обнаружены.
+- Файлы/модули: `src/execution/types.ts`, `src/execution/lora.ts`, `src/execution/assets.ts`, `src/execution/runner.ts`, `src/backends/workflow-api/client.ts`, `src/config.ts`, `src/storage/database.ts`, `src/execution/schemas.ts`, `src/mcp/server.ts`, `PROGRESS.md`.
+- Проверки: `npm.cmd run typecheck` — `PASS`; build, tests и `git diff --check` — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: signed URL expiry policy, media limits, agent instructions и live LoRA acceptance остаются вне выбранного подпункта.
+- Следующий шаг: добавить deterministic offline tests для MD5/signed PUT, dedicated cache, cross-profile guard, binding validation и MCP tool registration.
+
+### STEP-0237 — 2026-09-07 — добавлены LoRA offline regressions
+
+- Пакет и статус: L07 / `IN_PROGRESS`; deterministic tests добавлены, их прогон ещё не выполнен.
+- Изменения и назначение: покрыты отдельный LoRA cache/reference, запрет regular media upload, profile isolation, `RHLoraLoader` binding rejection, MD5 request и signed `PUT` без bearer auth; обновлены migration/config/tool-list expectations и отдельный `test:l07` script.
+- Файлы/модули: `tests/execution/l07.test.mjs`, `tests/unit/config.test.mjs`, `tests/unit/storage.test.mjs`, `tests/mcp/stdio.test.mjs`, `package.json`, `PROGRESS.md`.
+- Проверки: typecheck — `PASS` (STEP-0236); новые L07 tests, build, full offline acceptance и diff check — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: tests are synthetic/offline and do not prove provider LoRA availability; media limits, expiry policy, agent instructions и L08 не затронуты.
+- Следующий шаг: выполнить `npm.cmd run test:l07` и исправить только найденные regressions.
+
+### STEP-0238 — 2026-09-07 — LoRA targeted regression PASS
+
+- Пакет и статус: L07 / `IN_PROGRESS`; dedicated LoRA adapter/binding behavior проходит targeted offline regression.
+- Изменения и назначение: подтверждено, что runner вызывает только `uploadLora`, кэш не смешивает профили, некорректный loader блокируется до submit, а Workflow API LoRA flow считает MD5 и не передаёт bearer auth в signed `PUT`.
+- Файлы/модули: rebuilt `dist/`; `src/execution/*`, `src/backends/workflow-api/client.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/execution/l07.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:l07` — `PASS`, 4 tests, 0 failures; build внутри команды — `PASS`; ожидаемо выдан SQLite experimental warning. Full offline acceptance, MCP regression, explicit typecheck и diff check — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: synthetic tests не доказывают реальную доступность LoRA у профиля; docs/capability summary и MCP stdio expectation ещё нужно синхронизировать. Media limits, expiry policy, agent instructions и L08 не затронуты.
+- Следующий шаг: выполнить `npm.cmd run test:mcp`, затем полный offline acceptance; после этого обновить документацию и выполнить explicit checks.
+
+### STEP-0239 — 2026-09-07 — MCP LoRA tool regression PASS
+
+- Пакет и статус: L07 / `IN_PROGRESS`; новый `rh_upload_lora` зарегистрирован и не ломает stdio transport.
+- Изменения и назначение: реальный MCP `initialize`/`tools/list` увидел `rh_upload_lora`; существующие catalog, graph, project и execution-plan сценарии продолжают работать без provider вызова.
+- Файлы/модули: rebuilt `dist/`; `src/mcp/server.ts`, `src/execution/schemas.ts`, `tests/mcp/stdio.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:mcp` — `PASS`, 1 test, 0 failures; build внутри команды — `PASS`; SQLite experimental warning ожидаем. Full offline acceptance, explicit typecheck/build и diff check — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: MCP test проверяет регистрацию, а не live upload; нужно синхронизировать docs/capabilities и прогнать весь offline suite.
+- Следующий шаг: выполнить `npm.cmd run test:acceptance:offline`.
+
+### STEP-0240 — 2026-09-07 — full offline LoRA regression PASS
+
+- Пакет и статус: L07 / `IN_PROGRESS`; LoRA core и локальные regressions проходят весь offline suite.
+- Изменения и назначение: migration 8, новый route/tool, runner binding и dedicated tests не вызвали regressions в L00–L06, graph, project или stdio MCP flows.
+- Файлы/модули: rebuilt `dist/`; `src/backends/workflow-api/client.ts`, `src/config.ts`, `src/execution/assets.ts`, `src/execution/lora.ts`, `src/execution/runner.ts`, `src/execution/schemas.ts`, `src/execution/types.ts`, `src/mcp/server.ts`, `src/storage/database.ts`, tests, `package.json`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 15, L06 7, L07 4, MCP 1; всего 48 tests, 0 failures. Каждый build — `PASS`; ожидаемы SQLite experimental warnings. Explicit typecheck/build и diff check — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: нужно синхронизировать README/capabilities/configuration и выполнить explicit checks; live LoRA availability не доказывалась. Media limits, expiry policy, agent instructions и L08 не затронуты.
+- Следующий шаг: обновить только документацию выбранного LoRA подпункта, затем выполнить `npm.cmd run typecheck`, `npm.cmd run build` и `git diff --check`.
+
+### STEP-0241 — 2026-09-07 — синхронизирована LoRA documentation
+
+- Пакет и статус: L07 / `IN_PROGRESS`; выбранный LoRA подпункт документирован, explicit checks ещё не выполнены.
+- Изменения и назначение: README, capability matrix и configuration описывают отдельный `rh_upload_lora`, роль `lora`, `RHLoraLoader`, MD5/get-upload-URL/signed PUT flow, profile-scoped `fileName` cache и отсутствие live LoRA evidence; обычный media upload и LoRA flow явно разведены.
+- Файлы/модули: `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `PROGRESS.md`.
+- Проверки: документационная синхронизация — `PASS`; typecheck, build и diff check — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: media limits, cache expiry policy, agent instructions и L08 остаются отдельными TODO; L07 целиком ещё не завершён.
+- Следующий шаг: выполнить `npm.cmd run typecheck`, `npm.cmd run build` и `git diff --check`.
+
+### STEP-0242 — 2026-09-07 — LoRA final typecheck PASS
+
+- Пакет и статус: L07 / `IN_PROGRESS`; explicit typecheck после documentation sync прошёл.
+- Изменения и назначение: подтверждена согласованность TypeScript source после добавления LoRA adapter, cache migration, runner binding и MCP schema/tool.
+- Файлы/модули: `src/`, `README.md`, `docs/`, `PROGRESS.md`.
+- Проверки: `npm.cmd run typecheck` — `PASS`; build и `git diff --check` — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: media limits, cache expiry policy, agent instructions, live LoRA acceptance и L08 остаются отдельными TODO/`NOT_RUN`.
+- Следующий шаг: выполнить `npm.cmd run build`.
+
+### STEP-0243 — 2026-09-07 — LoRA final build PASS
+
+- Пакет и статус: L07 / `IN_PROGRESS`; production build после документационной синхронизации прошёл.
+- Изменения и назначение: `dist/` пересобран из LoRA-enabled source; emitted client, runner, storage migration and MCP tool are current.
+- Файлы/модули: rebuilt `dist/`; `src/`, `README.md`, `docs/`, `PROGRESS.md`.
+- Проверки: `npm.cmd run build` — `PASS`; typecheck — `PASS` (STEP-0242); `git diff --check` — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: media limits, cache expiry policy, agent instructions, live LoRA acceptance и L08 остаются отдельными TODO/`NOT_RUN`.
+- Следующий шаг: выполнить `git diff --check` и затем сверить итоговый diff/status.
+
+### STEP-0244 — 2026-09-07 — LoRA diff check PASS
+
+- Пакет и статус: L07 / `LOCAL_DONE` для выбранного LoRA upload/bindings подпункта; media rules, cache expiry, agent instructions и L08 не начинались.
+- Изменения и назначение: итоговый source/test/docs diff проверен после typecheck/build; пользовательские live scope и существующие изменения не затрагивались.
+- Файлы/модули: `src/backends/workflow-api/client.ts`, `src/config.ts`, `src/execution/assets.ts`, `src/execution/lora.ts`, `src/execution/runner.ts`, `src/execution/schemas.ts`, `src/execution/types.ts`, `src/mcp/server.ts`, `src/storage/database.ts`, `tests/execution/l07.test.mjs`, `tests/mcp/stdio.test.mjs`, `tests/unit/config.test.mjs`, `tests/unit/storage.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `package.json`, `PROGRESS.md`; `dist/` rebuilt.
+- Проверки: `git diff --check` — `PASS`; были только ожидаемые LF→CRLF warnings. `npm.cmd run typecheck` — `PASS` (STEP-0242), `npm.cmd run build` — `PASS` (STEP-0243), `npm.cmd run test:acceptance:offline` — `PASS` 48/48 (STEP-0240). Live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: реальная доступность LoRA и signed URL expiry не проверялись; media rules, cache expiry policy, agent instructions и L08 остаются следующими отдельными пунктами.
+- Следующий шаг: остановиться на завершённом выбранном LoRA подпункте; в новой задаче выбрать следующий пункт L07, не начинать его автоматически.
+
+### STEP-0245 — 2026-09-07 — обновлены L07 handoff и acceptance
+
+- Пакет и статус: L07 / `LOCAL_DONE` для LoRA upload/bindings; остальные L07 подпункты и L08 не начинались.
+- Изменения и назначение: сводка/handoff в `PROGRESS.md` теперь отражает частичный статус L07; `ACCEPTANCE.md` получил отдельную synthetic-contract запись `L07-LORA-001` с явным ограничением live availability/expiry.
+- Файлы/модули: `PROGRESS.md`, `ACCEPTANCE.md`.
+- Проверки: документационная сверка — `PASS`; финальный `git diff --check` после этого изменения — `NOT_RUN`; typecheck/build/offline tests уже `PASS` в STEP-0240/0242/0243. Live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: media rules, cache expiry policy, server instructions и live LoRA acceptance остаются отдельными TODO/`NOT_RUN`.
+- Следующий шаг: выполнить финальный `git diff --check` и остановиться.
+
+### STEP-0246 — 2026-09-07 — L07 LoRA подпункт финально проверен
+
+- Пакет и статус: L07 / `LOCAL_DONE` для dedicated LoRA upload/bindings; работа остановлена по правилу сессии.
+- Изменения и назначение: source, tests, acceptance evidence, documentation и handoff синхронизированы; новый `rh_upload_lora` не смешивает LoRA с обычным media upload, а `RHLoraLoader` binding проверяется до submit.
+- Файлы/модули: `ACCEPTANCE.md`, `PROGRESS.md`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `package.json`, `src/backends/workflow-api/client.ts`, `src/config.ts`, `src/execution/assets.ts`, `src/execution/lora.ts`, `src/execution/runner.ts`, `src/execution/schemas.ts`, `src/execution/types.ts`, `src/mcp/server.ts`, `src/storage/database.ts`, `tests/execution/l07.test.mjs`, `tests/mcp/stdio.test.mjs`, `tests/unit/config.test.mjs`, `tests/unit/storage.test.mjs`; `dist/` rebuilt.
+- Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; `npm.cmd run test:acceptance:offline` — `PASS`, 48/48 tests; `npm.cmd run test:l07` — `PASS`, 4/4; `npm.cmd run test:mcp` — `PASS`, 1/1; `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings. Live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: real LoRA availability, signed URL expiry, media limits, server instructions и L08 остаются `NOT_RUN`/`TODO`; L07 не следует считать полностью завершённым.
+- Следующий шаг: в новой отдельной задаче выбрать один оставшийся L07 подпункт; автоматически не начинать media rules, cache expiry, server instructions или L08.
