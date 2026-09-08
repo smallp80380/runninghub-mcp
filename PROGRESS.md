@@ -1062,3 +1062,13 @@
 - Доказательства: commit не создан; staging сохранён. Глобальный Git config не изменялся.
 - Ограничения/остаток: для commit нужны предоставленные пользователем имя и email автора либо локальная настройка identity; push не выполнялся.
 - Следующий шаг: получить желаемые `user.name` и `user.email`, применить их только для этого commit и повторить initial commit.
+
+### STEP-0099 — 2026-09-07 — initial git commit создан
+
+- Пакет и статус: repository bootstrap / LOCAL_DONE.
+- Изменения и назначение: локальный Git repository инициализирован и создан initial commit `0ac69e9` с сообщением `Initial RunningHub MCP implementation`; staged содержимое проекта сохранено без ignored dependencies/build outputs.
+- Файлы/модули: `.git/`, 64 tracked project files; `node_modules/` и `dist/` остаются ignored.
+- Проверки: `git status --short --ignored` — рабочее дерево чистое, только `dist/` и `node_modules/` ignored; `git log --oneline -1` — `0ac69e9`; `git diff HEAD --check` — PASS. Push не выполнялся.
+- Доказательства: initial commit создан с настроенной Git identity; secret scan до staging не нашёл ключей.
+- Ограничения/остаток: remote не настроен; ветка остаётся `master`; commit не отправлялся во внешний Git hosting.
+- Следующий шаг: при необходимости отдельно настроить remote/branch policy и выполнить push только по явному запросу.
