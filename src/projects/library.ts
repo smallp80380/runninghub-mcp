@@ -1,0 +1,7 @@
+import type { WorkflowCard } from "./context.js";
+
+export const defaultWorkflowCards: readonly WorkflowCard[] = [
+  { workflow_id: "synthetic-text-to-image-v1", purpose: "Image from a text prompt", output_kind: "image", input_roles: [], hard_constraints: { aspect_ratio: "any" }, backend_profile_id: "synthetic-basic", node_classes: ["Transform", "Save"], model_ids: ["synthetic-base-v1"], graph_hash: "fixture-text-image", last_verified_at: "2026-09-07T00:00:00Z", availability: "unknown" },
+  { workflow_id: "synthetic-reference-image-v1", purpose: "Image with character/location references", output_kind: "image", input_roles: ["character", "location"], hard_constraints: { aspect_ratio: "any" }, backend_profile_id: "synthetic-basic", node_classes: ["Source", "Transform", "Save"], model_ids: ["synthetic-base-v1"], graph_hash: "fixture-reference-image", last_verified_at: "2026-09-07T00:00:00Z", availability: "unknown" },
+  { workflow_id: "synthetic-image-to-video-v1", purpose: "Video from a starting image", output_kind: "video", input_roles: ["first_frame"], hard_constraints: { aspect_ratio: "any" }, backend_profile_id: "synthetic-basic", node_classes: ["Source", "Transform"], model_ids: ["synthetic-video-v1"], graph_hash: "fixture-image-video", last_verified_at: "2026-09-07T00:00:00Z", availability: "unknown" },
+];

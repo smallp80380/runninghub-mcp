@@ -1,0 +1,588 @@
+import { mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { dirname } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+
+const MIGRATIONS = [
+  {
+    id: 1,
+    sql: `
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY,
+        schema_version TEXT NOT NULL,
+        canonical_root TEXT NOT NULL,
+        backend_profile_id TEXT NOT NULL,
+        documents_json TEXT NOT NULL,
+        asset_roots_json TEXT NOT NULL,
+        output_root TEXT NOT NULL,
+        policy_revision TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS scenes (
+        id TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        schema_version TEXT NOT NULL,
+        aliases_json TEXT NOT NULL,
+        action_text TEXT NOT NULL,
+        output_kind TEXT NOT NULL,
+        constraints_json TEXT NOT NULL,
+        required_asset_roles_json TEXT NOT NULL,
+        dependencies_json TEXT NOT NULL,
+        sources_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, id)
+      );
+      CREATE TABLE IF NOT EXISTS assets (
+        id TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        schema_version TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        mime TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        roles_json TEXT NOT NULL,
+        source TEXT NOT NULL,
+        usage_policy_json TEXT NOT NULL,
+        review_reference_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, id),
+        UNIQUE (project_id, relative_path, content_hash)
+      );
+      CREATE TABLE IF NOT EXISTS workflow_revisions (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        schema_version TEXT NOT NULL,
+        parent_revision_id TEXT,
+        graph_blob_hash TEXT NOT NULL,
+        graph_json TEXT NOT NULL,
+        schema_refs_json TEXT NOT NULL,
+        bindings_json TEXT NOT NULL,
+        validation_json TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (workflow_id, id)
+      );
+      CREATE TABLE IF NOT EXISTS work_items (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        chain_id TEXT NOT NULL,
+        scene_id TEXT,
+        schema_version TEXT NOT NULL,
+        user_request TEXT NOT NULL,
+        request_kind TEXT NOT NULL,
+        allowed_outputs_json TEXT NOT NULL,
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS work_items_chain_idx ON work_items(project_id, chain_id);
+      CREATE TABLE IF NOT EXISTS execution_plans (
+        id TEXT PRIMARY KEY,
+        work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+        schema_version TEXT NOT NULL,
+        graph_revision_id TEXT NOT NULL REFERENCES workflow_revisions(id),
+        graph_hash TEXT NOT NULL,
+        workflow_json TEXT NOT NULL,
+        asset_bindings_json TEXT NOT NULL,
+        requirements_hash TEXT NOT NULL,
+        policy_hash TEXT NOT NULL,
+        backend_profile_id TEXT NOT NULL,
+        output_contract_json TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (work_item_id, id)
+      );
+      CREATE TABLE IF NOT EXISTS requests (
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        request_key TEXT NOT NULL,
+        plan_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, request_key)
+      );
+      CREATE TABLE IF NOT EXISTS jobs (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL UNIQUE REFERENCES execution_plans(id),
+        request_id TEXT NOT NULL,
+        schema_version TEXT NOT NULL,
+        execution_state TEXT NOT NULL,
+        provider_state TEXT NOT NULL,
+        artifact_state TEXT NOT NULL,
+        provider_task_id TEXT,
+        submit_intent TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (provider_task_id)
+      );
+      CREATE TABLE IF NOT EXISTS review_events (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        result_id TEXT NOT NULL,
+        output_hash TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        feedback TEXT,
+        user_message_ref TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE (job_id, result_id, output_hash, id)
+      );
+      CREATE TABLE IF NOT EXISTS poller_leases (
+        job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+        owner_id TEXT NOT NULL,
+        lease_until TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS outbox (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        aggregate_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        published_at TEXT,
+        created_at TEXT NOT NULL
+      );
+    `,
+  },
+  {
+    id: 2,
+    sql: `
+      CREATE TABLE IF NOT EXISTS provider_uploads (
+        profile_id TEXT NOT NULL,
+        api_family TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        mime TEXT NOT NULL,
+        provider_kind TEXT NOT NULL,
+        provider_value TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (profile_id, api_family, asset_id, content_hash)
+      );
+    `,
+  },
+  {
+    id: 3,
+    sql: `
+      ALTER TABLE execution_plans ADD COLUMN provider_workflow_id TEXT;
+    `,
+  },
+] as const;
+
+export interface WorkflowRevisionRow {
+  readonly id: string;
+  readonly workflow_id: string;
+  readonly project_id: string;
+  readonly schema_version: string;
+  readonly parent_revision_id?: string;
+  readonly graph_blob_hash: string;
+  readonly graph_json: string;
+  readonly schema_refs_json: string;
+  readonly bindings_json: string;
+  readonly validation_json: string;
+  readonly reason: string;
+  readonly created_at: string;
+}
+
+export interface ProjectRow {
+  readonly id: string;
+  readonly schema_version: string;
+  readonly canonical_root: string;
+  readonly backend_profile_id: string;
+  readonly documents_json: string;
+  readonly asset_roots_json: string;
+  readonly output_root: string;
+  readonly policy_revision: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface SceneRow {
+  readonly id: string;
+  readonly project_id: string;
+  readonly schema_version: string;
+  readonly aliases_json: string;
+  readonly action_text: string;
+  readonly output_kind: string;
+  readonly constraints_json: string;
+  readonly required_asset_roles_json: string;
+  readonly dependencies_json: string;
+  readonly sources_hash: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface AssetRow {
+  readonly id: string;
+  readonly project_id: string;
+  readonly schema_version: string;
+  readonly relative_path: string;
+  readonly content_hash: string;
+  readonly mime: string;
+  readonly size_bytes: number;
+  readonly roles_json: string;
+  readonly source: string;
+  readonly usage_policy_json: string;
+  readonly review_reference_json: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface ProviderUploadRow {
+  readonly profile_id: string;
+  readonly api_family: string;
+  readonly asset_id: string;
+  readonly content_hash: string;
+  readonly mime: string;
+  readonly provider_kind: string;
+  readonly provider_value: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface WorkItemRow {
+  readonly id: string;
+  readonly project_id: string;
+  readonly chain_id: string;
+  readonly scene_id: string | null;
+  readonly schema_version: string;
+  readonly user_request: string;
+  readonly request_kind: string;
+  readonly allowed_outputs_json: string;
+  readonly state: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface ExecutionPlanRow {
+  readonly id: string;
+  readonly work_item_id: string;
+  readonly schema_version: string;
+  readonly graph_revision_id: string;
+  readonly graph_hash: string;
+  readonly workflow_json: string;
+  readonly asset_bindings_json: string;
+  readonly requirements_hash: string;
+  readonly policy_hash: string;
+  readonly backend_profile_id: string;
+  readonly provider_workflow_id: string | null;
+  readonly output_contract_json: string;
+  readonly mode: string;
+  readonly project_id: string;
+  readonly created_at: string;
+}
+
+export interface JobRow {
+  readonly id: string;
+  readonly plan_id: string;
+  readonly request_id: string;
+  readonly schema_version: string;
+  readonly execution_state: string;
+  readonly provider_state: string;
+  readonly artifact_state: string;
+  readonly provider_task_id: string | null;
+  readonly submit_intent: string | null;
+  readonly attempts: number;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export class Storage {
+  readonly db: DatabaseSync;
+
+  constructor(dbPath: string) {
+    if (dbPath !== ":memory:") {
+      mkdirSync(dirname(dbPath), { recursive: true });
+    }
+    this.db = new DatabaseSync(dbPath);
+    this.db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+    this.applyMigrations();
+  }
+
+  private applyMigrations(): void {
+    this.db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);");
+    const applied = new Set(
+      (this.db.prepare("SELECT id FROM schema_migrations ORDER BY id").all() as Array<{ id: number }>).map(
+        (row) => row.id,
+      ),
+    );
+    for (const migration of MIGRATIONS) {
+      if (applied.has(migration.id)) {
+        continue;
+      }
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        this.db.exec(migration.sql);
+        this.db
+          .prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)")
+          .run(migration.id, new Date().toISOString());
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+  }
+
+  health(): { migration_version: number; table_count: number } {
+    const migration = this.db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM schema_migrations").get() as {
+      id: number;
+    };
+    const tables = this.db
+      .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+      .get() as { count: number };
+    return { migration_version: migration.id, table_count: tables.count };
+  }
+
+  registerProject(projectId: string, backendProfileId = "default"): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO projects
+          (id, schema_version, canonical_root, backend_profile_id, documents_json, asset_roots_json,
+           output_root, policy_revision, created_at, updated_at)
+         VALUES (?, '1', '', ?, '[]', '[]', '', '1', ?, ?)`,
+      )
+      .run(projectId, backendProfileId, now, now);
+  }
+
+  hasProject(projectId: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 AS found FROM projects WHERE id = ?").get(projectId));
+  }
+
+  saveProject(row: ProjectRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO projects
+          (id, schema_version, canonical_root, backend_profile_id, documents_json, asset_roots_json,
+           output_root, policy_revision, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET canonical_root=excluded.canonical_root,
+           backend_profile_id=excluded.backend_profile_id, documents_json=excluded.documents_json,
+           asset_roots_json=excluded.asset_roots_json, output_root=excluded.output_root,
+           policy_revision=excluded.policy_revision, updated_at=excluded.updated_at`,
+      )
+      .run(row.id, row.schema_version, row.canonical_root, row.backend_profile_id, row.documents_json, row.asset_roots_json, row.output_root, row.policy_revision, row.created_at, row.updated_at);
+  }
+
+  getProject(projectId: string): ProjectRow | undefined {
+    return this.db.prepare("SELECT * FROM projects WHERE id = ?").get(projectId) as unknown as ProjectRow | undefined;
+  }
+
+  listProjects(): ProjectRow[] {
+    return this.db.prepare("SELECT * FROM projects ORDER BY id").all() as unknown as ProjectRow[];
+  }
+
+  saveScene(row: SceneRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO scenes
+          (id, project_id, schema_version, aliases_json, action_text, output_kind, constraints_json,
+           required_asset_roles_json, dependencies_json, sources_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(project_id, id) DO UPDATE SET aliases_json=excluded.aliases_json,
+           action_text=excluded.action_text, output_kind=excluded.output_kind,
+           constraints_json=excluded.constraints_json, required_asset_roles_json=excluded.required_asset_roles_json,
+           dependencies_json=excluded.dependencies_json, sources_hash=excluded.sources_hash,
+           updated_at=excluded.updated_at`,
+      )
+      .run(row.id, row.project_id, row.schema_version, row.aliases_json, row.action_text, row.output_kind, row.constraints_json, row.required_asset_roles_json, row.dependencies_json, row.sources_hash, row.created_at, row.updated_at);
+  }
+
+  getScene(projectId: string, sceneId: string): SceneRow | undefined {
+    return this.db.prepare("SELECT * FROM scenes WHERE project_id = ? AND id = ?").get(projectId, sceneId) as unknown as SceneRow | undefined;
+  }
+
+  listScenes(projectId: string): SceneRow[] {
+    return this.db.prepare("SELECT * FROM scenes WHERE project_id = ? ORDER BY id").all(projectId) as unknown as SceneRow[];
+  }
+
+  saveAsset(row: AssetRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO assets
+          (id, project_id, schema_version, relative_path, content_hash, mime, size_bytes, roles_json,
+           source, usage_policy_json, review_reference_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(project_id, id) DO UPDATE SET roles_json=excluded.roles_json,
+           source=excluded.source, usage_policy_json=excluded.usage_policy_json,
+           updated_at=excluded.updated_at`,
+      )
+      .run(row.id, row.project_id, row.schema_version, row.relative_path, row.content_hash, row.mime, row.size_bytes, row.roles_json, row.source, row.usage_policy_json, row.review_reference_json, row.created_at, row.updated_at);
+  }
+
+  listAssets(projectId: string): AssetRow[] {
+    return this.db.prepare("SELECT * FROM assets WHERE project_id = ? ORDER BY relative_path, content_hash").all(projectId) as unknown as AssetRow[];
+  }
+
+  getAsset(projectId: string, assetId: string): AssetRow | undefined {
+    return this.db.prepare("SELECT * FROM assets WHERE project_id = ? AND id = ?").get(projectId, assetId) as unknown as AssetRow | undefined;
+  }
+
+  getProviderUpload(profileId: string, apiFamily: string, assetId: string, contentHash: string): ProviderUploadRow | undefined {
+    return this.db
+      .prepare("SELECT * FROM provider_uploads WHERE profile_id = ? AND api_family = ? AND asset_id = ? AND content_hash = ?")
+      .get(profileId, apiFamily, assetId, contentHash) as unknown as ProviderUploadRow | undefined;
+  }
+
+  saveProviderUpload(row: ProviderUploadRow): ProviderUploadRow {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO provider_uploads
+          (profile_id, api_family, asset_id, content_hash, mime, provider_kind, provider_value, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.profile_id, row.api_family, row.asset_id, row.content_hash, row.mime, row.provider_kind, row.provider_value, row.created_at, row.updated_at);
+    const stored = this.getProviderUpload(row.profile_id, row.api_family, row.asset_id, row.content_hash);
+    if (!stored) throw new Error(`Provider upload ${row.asset_id} was not persisted`);
+    return stored;
+  }
+
+  saveWorkItem(row: WorkItemRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO work_items
+          (id, project_id, chain_id, scene_id, schema_version, user_request, request_kind,
+           allowed_outputs_json, state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.id, row.project_id, row.chain_id, row.scene_id, row.schema_version, row.user_request, row.request_kind, row.allowed_outputs_json, row.state, row.created_at, row.updated_at);
+  }
+
+  getWorkItem(id: string): WorkItemRow | undefined {
+    return this.db.prepare("SELECT * FROM work_items WHERE id = ?").get(id) as unknown as WorkItemRow | undefined;
+  }
+
+  closeWorkItem(id: string): void {
+    this.db.prepare("UPDATE work_items SET state = 'CLOSED', updated_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+  }
+
+  saveExecutionPlan(row: ExecutionPlanRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO execution_plans
+          (id, work_item_id, schema_version, graph_revision_id, graph_hash, workflow_json, asset_bindings_json,
+           requirements_hash, policy_hash, backend_profile_id, provider_workflow_id, output_contract_json, mode, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.id, row.work_item_id, row.schema_version, row.graph_revision_id, row.graph_hash, row.workflow_json, row.asset_bindings_json, row.requirements_hash, row.policy_hash, row.backend_profile_id, row.provider_workflow_id, row.output_contract_json, row.mode, row.created_at);
+  }
+
+  getExecutionPlan(id: string): ExecutionPlanRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT p.*, w.project_id AS project_id
+           FROM execution_plans p JOIN work_items w ON w.id = p.work_item_id
+          WHERE p.id = ?`,
+      )
+      .get(id) as unknown as ExecutionPlanRow | undefined;
+  }
+
+  private getJobRow(id: string): JobRow | undefined {
+    return this.db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as unknown as JobRow | undefined;
+  }
+
+  getJob(id: string): JobRow | undefined {
+    return this.getJobRow(id);
+  }
+
+  getJobByPlan(planId: string): JobRow | undefined {
+    return this.db.prepare("SELECT * FROM jobs WHERE plan_id = ?").get(planId) as unknown as JobRow | undefined;
+  }
+
+  reserveJob(projectId: string, planId: string, requestId: string): JobRow {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existingRequest = this.db.prepare("SELECT plan_id FROM requests WHERE project_id = ? AND request_key = ?").get(projectId, requestId) as { plan_id: string } | undefined;
+      if (existingRequest && existingRequest.plan_id !== planId) {
+        throw new Error("REQUEST_CONFLICT");
+      }
+      const existingJob = this.getJobByPlan(planId);
+      if (existingJob) {
+        this.db.exec("COMMIT");
+        return existingJob;
+      }
+      if (!existingRequest) this.db.prepare("INSERT INTO requests (project_id, request_key, plan_id, created_at) VALUES (?, ?, ?, ?)").run(projectId, requestId, planId, new Date().toISOString());
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      this.db.prepare(`INSERT INTO jobs (id, plan_id, request_id, schema_version, execution_state, provider_state, artifact_state, provider_task_id, submit_intent, attempts, created_at, updated_at) VALUES (?, ?, ?, '1', 'READY', 'NOT_SUBMITTED', 'NONE', NULL, NULL, 0, ?, ?)`).run(id, planId, requestId, now, now);
+      const created = this.getJobRow(id);
+      if (!created) throw new Error("Job insert did not return a row");
+      this.db.exec("COMMIT");
+      return created;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  claimSubmit(jobId: string, submitIntent: string): boolean {
+    const result = this.db.prepare("UPDATE jobs SET execution_state = 'SUBMITTING', submit_intent = ?, attempts = attempts + 1, updated_at = ? WHERE id = ? AND execution_state = 'READY' AND submit_intent IS NULL").run(submitIntent, new Date().toISOString(), jobId);
+    return Number(result.changes) === 1;
+  }
+
+  markSubmitUnknown(jobId: string): void {
+    this.db.prepare("UPDATE jobs SET execution_state = 'SUBMIT_UNKNOWN', provider_state = 'UNKNOWN', updated_at = ? WHERE id = ?").run(new Date().toISOString(), jobId);
+  }
+
+  recordProviderTask(jobId: string, taskId: string): void {
+    this.db.prepare("UPDATE jobs SET execution_state = 'RUNNING', provider_state = 'QUEUED', provider_task_id = ?, updated_at = ? WHERE id = ? AND provider_task_id IS NULL").run(taskId, new Date().toISOString(), jobId);
+  }
+
+  markProviderStatus(jobId: string, status: "QUEUED" | "RUNNING" | "SUCCESS" | "FAILED" | "CANCEL", artifactState?: string): void {
+    const state = status === "SUCCESS" ? "SUCCEEDED" : status === "FAILED" ? "FAILED" : status === "CANCEL" ? "CANCELLED" : "RUNNING";
+    const provider = status === "SUCCESS" ? "SUCCEEDED" : status === "FAILED" ? "FAILED" : status === "CANCEL" ? "CANCELLED" : status;
+    this.db.prepare("UPDATE jobs SET execution_state = ?, provider_state = ?, artifact_state = COALESCE(?, artifact_state), updated_at = ? WHERE id = ?").run(state, provider, artifactState ?? null, new Date().toISOString(), jobId);
+  }
+
+  markArtifact(jobId: string, state: "NONE" | "PENDING" | "READY" | "FAILED"): void {
+    this.db.prepare("UPDATE jobs SET artifact_state = ?, updated_at = ? WHERE id = ?").run(state, new Date().toISOString(), jobId);
+  }
+
+  cancelLocalJob(jobId: string): void {
+    this.db.prepare("UPDATE jobs SET execution_state = 'CANCELLED', provider_state = 'CANCELLED', updated_at = ? WHERE id = ? AND provider_task_id IS NULL AND execution_state IN ('READY', 'SUBMITTING', 'SUBMIT_UNKNOWN')").run(new Date().toISOString(), jobId);
+  }
+
+  listRecoverableJobs(): JobRow[] {
+    return this.db.prepare("SELECT * FROM jobs WHERE execution_state IN ('SUBMIT_UNKNOWN', 'RUNNING', 'SUBMITTING') ORDER BY created_at").all() as unknown as JobRow[];
+  }
+
+  saveWorkflowRevision(row: WorkflowRevisionRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO workflow_revisions
+          (id, workflow_id, project_id, schema_version, parent_revision_id, graph_blob_hash, graph_json,
+           schema_refs_json, bindings_json, validation_json, reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.workflow_id,
+        row.project_id,
+        row.schema_version,
+        row.parent_revision_id ?? null,
+        row.graph_blob_hash,
+        row.graph_json,
+        row.schema_refs_json,
+        row.bindings_json,
+        row.validation_json,
+        row.reason,
+        row.created_at,
+      );
+  }
+
+  loadWorkflowRevisions(): WorkflowRevisionRow[] {
+    return this.db
+      .prepare(
+        `SELECT id, workflow_id, project_id, schema_version, parent_revision_id, graph_blob_hash,
+                graph_json, schema_refs_json, bindings_json, validation_json, reason, created_at
+           FROM workflow_revisions ORDER BY created_at, id`,
+      )
+      .all() as unknown as WorkflowRevisionRow[];
+  }
+
+  close(): void {
+    this.db.close();
+  }
+}
