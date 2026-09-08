@@ -168,6 +168,50 @@ const MIGRATIONS = [
       ALTER TABLE execution_plans ADD COLUMN provider_workflow_id TEXT;
     `,
   },
+  {
+    id: 4,
+    sql: `
+      CREATE TABLE IF NOT EXISTS results (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        output_id TEXT NOT NULL,
+        schema_version TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        mime TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        content_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (job_id, output_id)
+      );
+    `,
+  },
+  {
+    id: 5,
+    sql: `
+      CREATE TABLE IF NOT EXISTS derived_results (
+        id TEXT PRIMARY KEY,
+        result_id TEXT NOT NULL REFERENCES results(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        schema_version TEXT NOT NULL,
+        source_hash TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        mime TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        content_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (result_id, kind)
+      );
+    `,
+  },
+  {
+    id: 6,
+    sql: `
+      CREATE UNIQUE INDEX IF NOT EXISTS outbox_kind_aggregate_idx
+        ON outbox(kind, aggregate_id);
+    `,
+  },
 ] as const;
 
 export interface WorkflowRevisionRow {
@@ -286,6 +330,42 @@ export interface JobRow {
   readonly attempts: number;
   readonly created_at: string;
   readonly updated_at: string;
+}
+
+export interface ResultRow {
+  readonly id: string;
+  readonly job_id: string;
+  readonly output_id: string;
+  readonly schema_version: string;
+  readonly relative_path: string;
+  readonly mime: string;
+  readonly size_bytes: number;
+  readonly content_hash: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface DerivedResultRow {
+  readonly id: string;
+  readonly result_id: string;
+  readonly kind: "preview" | "poster";
+  readonly schema_version: string;
+  readonly source_hash: string;
+  readonly relative_path: string;
+  readonly mime: string;
+  readonly size_bytes: number;
+  readonly content_hash: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface OutboxRow {
+  readonly id: string;
+  readonly kind: string;
+  readonly aggregate_id: string;
+  readonly payload_json: string;
+  readonly published_at: string | null;
+  readonly created_at: string;
 }
 
 export class Storage {
@@ -538,6 +618,91 @@ export class Storage {
 
   markArtifact(jobId: string, state: "NONE" | "PENDING" | "READY" | "FAILED"): void {
     this.db.prepare("UPDATE jobs SET artifact_state = ?, updated_at = ? WHERE id = ?").run(state, new Date().toISOString(), jobId);
+  }
+
+  getResult(jobId: string, outputId: string): ResultRow | undefined {
+    return this.db.prepare("SELECT * FROM results WHERE job_id = ? AND output_id = ?").get(jobId, outputId) as unknown as ResultRow | undefined;
+  }
+
+  getResultById(id: string): ResultRow | undefined {
+    return this.db.prepare("SELECT * FROM results WHERE id = ?").get(id) as unknown as ResultRow | undefined;
+  }
+
+  listResults(jobId: string): ResultRow[] {
+    return this.db.prepare("SELECT * FROM results WHERE job_id = ? ORDER BY output_id").all(jobId) as unknown as ResultRow[];
+  }
+
+  saveResult(row: ResultRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO results
+          (id, job_id, output_id, schema_version, relative_path, mime, size_bytes, content_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(job_id, output_id) DO UPDATE SET relative_path=excluded.relative_path,
+           mime=excluded.mime, size_bytes=excluded.size_bytes, content_hash=excluded.content_hash,
+           updated_at=excluded.updated_at`,
+      )
+      .run(row.id, row.job_id, row.output_id, row.schema_version, row.relative_path, row.mime, row.size_bytes, row.content_hash, row.created_at, row.updated_at);
+  }
+
+  getDerivedResult(resultId: string, kind: DerivedResultRow["kind"]): DerivedResultRow | undefined {
+    return this.db.prepare("SELECT * FROM derived_results WHERE result_id = ? AND kind = ?").get(resultId, kind) as unknown as DerivedResultRow | undefined;
+  }
+
+  getDerivedResultById(id: string): DerivedResultRow | undefined {
+    return this.db.prepare("SELECT * FROM derived_results WHERE id = ?").get(id) as unknown as DerivedResultRow | undefined;
+  }
+
+  listDerivedResults(resultId: string): DerivedResultRow[] {
+    return this.db.prepare("SELECT * FROM derived_results WHERE result_id = ? ORDER BY kind").all(resultId) as unknown as DerivedResultRow[];
+  }
+
+  saveDerivedResult(row: DerivedResultRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO derived_results
+          (id, result_id, kind, schema_version, source_hash, relative_path, mime, size_bytes, content_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(result_id, kind) DO UPDATE SET source_hash=excluded.source_hash,
+           relative_path=excluded.relative_path, mime=excluded.mime, size_bytes=excluded.size_bytes,
+           content_hash=excluded.content_hash, updated_at=excluded.updated_at`,
+      )
+      .run(row.id, row.result_id, row.kind, row.schema_version, row.source_hash, row.relative_path, row.mime, row.size_bytes, row.content_hash, row.created_at, row.updated_at);
+  }
+
+  getWorkflowRevision(id: string): WorkflowRevisionRow | undefined {
+    return this.db.prepare("SELECT * FROM workflow_revisions WHERE id = ?").get(id) as unknown as WorkflowRevisionRow | undefined;
+  }
+
+  getOutbox(id: string): OutboxRow | undefined {
+    return this.db.prepare("SELECT * FROM outbox WHERE id = ?").get(id) as unknown as OutboxRow | undefined;
+  }
+
+  getOutboxByAggregate(kind: string, aggregateId: string): OutboxRow | undefined {
+    return this.db.prepare("SELECT * FROM outbox WHERE kind = ? AND aggregate_id = ?").get(kind, aggregateId) as unknown as OutboxRow | undefined;
+  }
+
+  listPendingOutbox(kind?: string): OutboxRow[] {
+    if (kind) {
+      return this.db.prepare("SELECT * FROM outbox WHERE published_at IS NULL AND kind = ? ORDER BY created_at, id").all(kind) as unknown as OutboxRow[];
+    }
+    return this.db.prepare("SELECT * FROM outbox WHERE published_at IS NULL ORDER BY created_at, id").all() as unknown as OutboxRow[];
+  }
+
+  enqueueOutbox(row: OutboxRow): OutboxRow {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO outbox (id, kind, aggregate_id, payload_json, published_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.id, row.kind, row.aggregate_id, row.payload_json, row.published_at, row.created_at);
+    const stored = this.getOutbox(row.id);
+    if (!stored) throw new Error(`Outbox ${row.id} was not persisted`);
+    return stored;
+  }
+
+  markOutboxPublished(id: string, publishedAt = new Date().toISOString()): void {
+    this.db.prepare("UPDATE outbox SET published_at = COALESCE(published_at, ?) WHERE id = ?").run(publishedAt, id);
   }
 
   cancelLocalJob(jobId: string): void {

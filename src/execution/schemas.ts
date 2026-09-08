@@ -28,6 +28,10 @@ export const jobSchema = {
   timeout_ms: z.number().int().min(0).max(60_000).optional(),
 };
 
+export const getResultsSchema = {
+  job_id: z.string().min(1),
+};
+
 export const assetToolSchema = {
   action: z.enum(["inspect", "register", "prepare", "upload"]),
   project_id: z.string().min(1),

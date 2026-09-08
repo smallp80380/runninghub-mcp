@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../../dist/mcp/server.js";
+import { DerivedMediaService } from "../../dist/execution/derivatives.js";
 import { ResultDownloadService } from "../../dist/execution/results.js";
 import { planToRow } from "../../dist/execution/runner.js";
 import { RevisionStore } from "../../dist/graph/revisions.js";
@@ -16,13 +18,7 @@ import { ProjectContextService } from "../../dist/projects/context.js";
 import { Storage } from "../../dist/storage/database.js";
 import { SqliteRevisionPersistence } from "../../dist/storage/revisions.js";
 
-const validPng = Uint8Array.from([
-  137, 80, 78, 71, 13, 10, 26, 10,
-  0, 0, 0, 13, 73, 72, 68, 82,
-  0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0,
-  0, 0, 0, 0,
-  0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
-]);
+const validPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
 const validQuickTime = Uint8Array.from([
   0, 0, 0, 16, 102, 116, 121, 112,
@@ -143,6 +139,49 @@ test("accepts a QuickTime container with the provider's video/mp4 label", async 
   }
 });
 
+test("creates and reuses an image preview derivative", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runninghub-mcp-results-preview-"));
+  const backend = new BytesBackend();
+  try {
+    const { storage, job } = createProjectJob(root);
+    const [original] = await new ResultDownloadService(storage, backend).download(job.id);
+    const service = new DerivedMediaService(storage, { ffmpeg_path: "ffmpeg" });
+    const first = await service.derive([original.result_id]);
+    const second = await service.derive([original.result_id]);
+    assert.equal(first.results.length, 1);
+    assert.equal(first.results[0].kind, "preview");
+    assert.equal(first.results[0].mime, "image/png");
+    assert.equal(first.warnings.length, 0);
+    assert.deepEqual(second, first);
+    assert.equal(storage.listDerivedResults(original.result_id).length, 1);
+    assert.deepEqual(readFileSync(join(root, first.results[0].relative_path)).subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    storage.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("creates a video poster from the first frame without another provider operation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runninghub-mcp-results-poster-"));
+  const videoPath = join(root, "source.mp4");
+  try {
+    const generated = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=16x16:r=1", "-frames:v", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", videoPath], { encoding: "utf8" });
+    assert.equal(generated.status, 0, generated.stderr);
+    const backend = new BytesBackend();
+    const { storage, job } = createProjectJob(root);
+    backend.output = { id: "video-output", bytes: readFileSync(videoPath), mime: "video/mp4" };
+    const [original] = await new ResultDownloadService(storage, backend).download(job.id);
+    const derived = await new DerivedMediaService(storage, { ffmpeg_path: "ffmpeg" }).derive([original.result_id]);
+    assert.equal(derived.results.length, 1);
+    assert.equal(derived.results[0].kind, "poster");
+    assert.equal(derived.results[0].mime, "image/png");
+    assert.equal(derived.warnings.length, 0);
+    storage.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rh_get_results downloads through the MCP transport without submitting a task", async () => {
   const root = mkdtempSync(join(tmpdir(), "runninghub-mcp-results-mcp-"));
   const httpRequests = { submit: 0, output: 0, media: 0 };
@@ -196,8 +235,23 @@ test("rh_get_results downloads through the MCP transport without submitting a ta
     assert.equal(payload.data.results.length, 1);
     assert.equal(payload.data.results[0].mime, "image/png");
     assert.match(payload.data.results[0].resource_uri, /^runninghub:\/\/result\//);
+    assert.equal(payload.data.manifest.manifest_id, job.id);
+    assert.match(payload.data.manifest.relative_path, /^\.runninghub\/runs\/[^/]+\/manifest\.json$/);
+    assert.equal(payload.data.manifest.outbox_id, `result-manifest:${job.id}`);
     assert.ok(!JSON.stringify(payload).includes("synthetic-key"));
     assert.deepEqual(readFileSync(join(root, payload.data.results[0].relative_path)), Buffer.from(validPng));
+    const manifestPath = join(root, payload.data.manifest.relative_path);
+    assert.equal(existsSync(manifestPath), true);
+    const manifestText = readFileSync(manifestPath, "utf8");
+    const manifest = JSON.parse(manifestText);
+    assert.equal(manifest.schema_version, "1");
+    assert.equal(manifest.project.project_id, "download-project");
+    assert.equal(manifest.outputs[0].content_hash, payload.data.results[0].content_hash);
+    assert.equal(manifest.review.status, "NOT_READY");
+    assert.ok(manifest.workflow.submitted_workflow_hash);
+    assert.equal(manifestText.includes(root), false);
+    assert.equal(manifestText.includes("synthetic-key"), false);
+    assert.equal(storage.getOutbox(payload.data.manifest.outbox_id).published_at !== null, true);
     const resourceLink = result.content.find((item) => item.type === "resource_link");
     assert.ok(resourceLink);
     assert.equal(resourceLink.uri, payload.data.results[0].resource_uri);
@@ -206,8 +260,20 @@ test("rh_get_results downloads through the MCP transport without submitting a ta
     assert.equal(resource.contents.length, 1);
     assert.equal(resource.contents[0].mimeType, "image/png");
     assert.deepEqual(Buffer.from(resource.contents[0].blob, "base64"), Buffer.from(validPng));
+    const derivedLink = result.content.find((item) => item.type === "resource_link" && item.uri.startsWith("runninghub://derived/"));
+    assert.ok(derivedLink);
+    assert.equal(derivedLink.mimeType, "image/png");
+    const derivedResource = await client.readResource({ uri: derivedLink.uri });
+    assert.equal(derivedResource.contents.length, 1);
+    assert.equal(derivedResource.contents[0].mimeType, "image/png");
+    assert.deepEqual(Buffer.from(derivedResource.contents[0].blob, "base64").subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    storage.db.prepare("UPDATE outbox SET published_at = NULL WHERE id = ?").run(payload.data.manifest.outbox_id);
+    const repeated = await client.callTool({ name: "rh_get_results", arguments: { job_id: job.id } });
+    const repeatedPayload = JSON.parse(repeated.content[0].text);
+    assert.equal(repeatedPayload.data.manifest.content_hash, payload.data.manifest.content_hash);
+    assert.equal(storage.getOutbox(payload.data.manifest.outbox_id).published_at !== null, true);
     assert.equal(httpRequests.submit, 0);
-    assert.equal(httpRequests.output, 1);
+    assert.equal(httpRequests.output, 2);
     assert.equal(httpRequests.media, 1);
     await client.close();
     await server.close();

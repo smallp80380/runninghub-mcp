@@ -8,6 +8,9 @@ The server has no embedded credentials and never accepts an API key in tool argu
 | `RUNNINGHUB_DB_PATH` | `<data dir>/runninghub.sqlite` | SQLite path; use only for an explicitly selected absolute path |
 | `RUNNINGHUB_CATALOG_DIR` | `<working directory>/data/upstream` | Pinned public catalog snapshot |
 | `RUNNINGHUB_PROJECT_ROOT` | unset | Reserved project root for later packages |
+| `RUNNINGHUB_FFMPEG_PATH` | `ffmpeg` on `PATH` | Local executable used for image previews and video posters |
+
+Successful `rh_get_results` calls also write an immutable manifest to `.runninghub/runs/<job_id>/manifest.json` under the registered project root. SQLite stores its idempotent `result_manifest` publication event in the outbox; review state remains `NOT_READY` until the review package is implemented.
 
 To enable the L05 Workflow API adapter, set only the API key. It is read into process memory and is never accepted in MCP arguments, stored in SQLite, or returned by capabilities:
 

@@ -9,7 +9,7 @@
 
 - L00–L04: `LOCAL_DONE`.
 - L05: `LIVE_PENDING`. Durable execution, recovery, upload/cache, status/output/cancel и structural graph flow реализованы. Scoped live evidence получена для submit/status/output/upload/structural graph/cancel, active workflow и unknown-task not-found reconciliation.
-- L06: `IN_PROGRESS` — подпункты result download и MCP resource link `LOCAL_DONE`; read-only live verification существующего output/resource path `PASS`: provider outputs скачиваются в локальные оригиналы с атомарной записью и MIME/container validation, а сохранённые результаты доступны через opaque `runninghub://result/<id>` resource links. Derived preview/poster, manifests/outbox и review loop не входят в завершённые подпункты.
+- L06: `IN_PROGRESS` — подпункты result download, MCP resource link, local derived image preview/video poster и manifests/outbox `LOCAL_DONE`; read-only live verification существующего output/resource path `PASS`: provider outputs скачиваются в локальные оригиналы с атомарной записью и MIME/container validation, а сохранённые результаты, derivatives и local manifest publication доступны через opaque MCP resource links/metadata. Review loop не реализован.
 - L07: `TODO` — LoRA upload/bindings, media rules, cache expiry и server instructions.
 - L08: `TODO` — финальная live acceptance и проверка поставки.
 
@@ -17,11 +17,11 @@
 
 - `npm.cmd run typecheck` — PASS.
 - `npm.cmd run build` — PASS.
-- `npm.cmd run test:acceptance:offline` — PASS, 40 тестов.
+- `npm.cmd run test:acceptance:offline` — PASS, 38 тестов.
 - Active live probe workflow `2087104558464446466` — PASS; provider task `2097126350429659137` завершена с `outputs_ready=true`.
 - Output query — `SUCCESS`, один MP4 output; URL не хранится в журнале.
 - Read-only live `rh_get_results` + `resources/read` — PASS; output сохранён как `video/quicktime`, URL не хранится в журнале.
-- Не проверены: natural expiry существующей задачи, account-wide compatibility, derived preview/poster и review loop.
+- Не проверены: natural expiry существующей задачи, account-wide compatibility, live preview/poster/manifest compatibility и review loop.
 
 ## Правила Сессии
 
@@ -32,8 +32,8 @@
 
 ## Handoff
 
-- Текущий пакет: L06 / `IN_PROGRESS`; result download и resource link завершены локально, read-only live result/resource verification завершена.
-- Следующий шаг: в отдельной задаче выбрать derived preview/poster как следующий L06 подпункт; автоматически его не начинать.
+- Текущий пакет: L06 / `IN_PROGRESS`; result download, resource link, local derived preview/poster и manifests/outbox завершены локально, read-only live result/resource verification завершена.
+- Следующий шаг: в отдельной задаче выбрать review events/manifest review state как следующий L06 подпункт; автоматически его не начинать.
 - Repository bootstrap: commits `0ac69e9` и `9871e60`; после текущей архивации документационные изменения ещё не закоммичены.
 
 ### STEP-0101 — 2026-09-07 — compact active progress journal
@@ -450,3 +450,233 @@
 - Проверки: `git diff --check` — `PASS`; только ожидаемые LF→CRLF warnings. Live API после PASS не вызывался повторно; submit/upload/cancel и внешние изменения — `NOT_RUN`.
 - Ограничения/остаток: следующий L06 подпункт не начинался; derived preview/poster, manifests/outbox и review loop остаются TODO.
 - Следующий шаг: в новой отдельной задаче начать derived preview/poster; автоматически не начинать его в этой сессии.
+
+### STEP-0146 — 2026-09-07 — выбран derived preview/poster
+
+- Пакет и статус: L06 / `IN_PROGRESS`; выбран только подпункт derived preview/poster.
+- Изменения и назначение: после сохранения локального original `rh_get_results` будет создавать идемпотентные производные PNG: уменьшенный `preview` для image и первый кадр `poster` для video. Производные будут храниться отдельно, проверяться по hash и отдаваться через opaque MCP resource links.
+- Файлы/модули: на момент записи изменён только `PROGRESS.md`; migration, derivative service, MCP integration и tests ещё не изменялись.
+- Проверки: наличие локального `ffmpeg` — `PASS` (`C:\Users\Admin\scoop\shims\ffmpeg.exe`); реализация, typecheck, build и tests — `NOT_RUN`. Live API, платные генерации, upload/cancel и пользовательские assets не выполняются.
+- Ограничения/остаток: media processing использует только фиксированный локальный `ffmpeg` subprocess без shell; audio outputs не получают derived preview/poster. Manifests/outbox, review и chain gate не начинаются.
+- Следующий шаг: добавить durable derived-result records, atomic preview/poster generation и MCP `resources/read` links, затем проверить их через offline transport.
+
+### STEP-0147 — 2026-09-07 — реализован derived preview/poster path
+
+- Пакет и статус: L06 / `IN_PROGRESS`; implementation выбранного preview/poster подпункта добавлена, проверки ещё не завершены.
+- Изменения и назначение: добавлена migration `derived_results`, `DerivedMediaService` с hash-aware reuse, project-root/symlink checks, atomic file writes и фиксированным `ffmpeg` subprocess. Image outputs получают уменьшенный PNG `preview`, video outputs — PNG `poster` первого кадра; `rh_get_results` возвращает derived metadata и `runninghub://derived/<id>` resource links, `resources/read` проверяет их повторно.
+- Файлы/модули: `src/storage/database.ts`, новый `src/execution/derivatives.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `PROGRESS.md`.
+- Проверки: после изменения `npm.cmd run typecheck`, `npm.cmd run build`, `npm.cmd run test:l06`, `npm.cmd run test:acceptance:offline` — `NOT_RUN`; live API, submit/upload/cancel и пользовательские assets не выполнялись.
+- Доказательства: offline tests добавлены для PNG preview reuse, video first-frame poster и MCP `resources/read`; synthetic fixtures не являются live provider evidence.
+- Ограничения/остаток: audio derivative не создаётся; manifests/outbox, review и chain gate не реализуются. Нужно исправить только связанные compile/test regressions и обновить capability docs.
+- Следующий шаг: выполнить `npm.cmd run typecheck`, затем исправить только diagnostics выбранного подпункта.
+
+### STEP-0148 — 2026-09-07 — derived path typecheck PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; preview/poster runtime ещё не подтверждён.
+- Изменения и назначение: strict TypeScript check нового migration/service/resource path прошёл без diagnostics.
+- Файлы/модули: `src/execution/derivatives.ts`, `src/storage/database.ts`, `src/mcp/server.ts`; `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`; `PROGRESS.md`.
+- Проверки: `npm.cmd run typecheck` — `PASS`. Build, L06 tests и полный offline acceptance — `NOT_RUN`; live API и внешние изменения не выполнялись.
+- Ограничения/остаток: требуется runtime build и проверка фактической генерации PNG preview/poster, затем синхронизация docs/capabilities.
+- Следующий шаг: выполнить `npm.cmd run test:l06` (он пересобирает `dist`).
+
+### STEP-0149 — 2026-09-07 — derived preview/poster runtime PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; preview/poster local path реализован, общая regression ещё не завершена.
+- Изменения и назначение: build собрал migration/service/server; L06 tests подтвердили PNG preview reuse, video first-frame poster, atomic local files и derived MCP resource read без нового submit.
+- Файлы/модули: rebuilt `dist/`; `src/execution/derivatives.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`; `PROGRESS.md`.
+- Проверки: `npm.cmd run test:l06` — `PASS`: build `PASS`, 6 tests, 0 failures. SQLite experimental warning ожидаем. Полный offline acceptance и `test:mcp` — `NOT_RUN`; live API и внешние изменения не выполнялись.
+- Доказательства: test 4 создаёт и повторно использует image preview; test 5 получает poster первого video frame; MCP test читает derived PNG через `resources/read`; submit count остаётся `0`.
+- Ограничения/остаток: ffmpeg availability у целевого пользователя должна быть настроена; audio outputs получают warning без derivative. Manifests/outbox, review и chain gate не реализуются.
+- Следующий шаг: обновить `README.md`, `docs/capabilities.md`, `docs/configuration.md` под локальный preview/poster contract, затем выполнить `npm.cmd run test:mcp`.
+
+### STEP-0150 — 2026-09-07 — синхронизирована документация preview/poster
+
+- Пакет и статус: L06 / `IN_PROGRESS`; локальный preview/poster path документирован, regression ещё не завершена.
+- Изменения и назначение: README и capability matrix теперь различают originals, image previews, video posters и незавершённые manifests/review; configuration описывает `RUNNINGHUB_FFMPEG_PATH` и отсутствие network/provider claims.
+- Файлы/модули: `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `PROGRESS.md`.
+- Проверки: после документационных изменений `npm.cmd run test:mcp` и полный offline acceptance — `NOT_RUN`; runtime code не менялся, live API и внешние изменения не выполнялись.
+- Ограничения/остаток: требуется убедиться, что MCP stdio и весь offline acceptance не регрессировали после migration/resource registration.
+- Следующий шаг: выполнить `npm.cmd run test:mcp`.
+
+### STEP-0151 — 2026-09-07 — MCP stdio regression PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; общая offline regression ещё не завершена.
+- Изменения и назначение: dynamic `runninghub://derived/{derived_id}` resource registration и migration 5 не нарушили existing stdio initialize/tools/list/call flow.
+- Файлы/модули: rebuilt `dist/`; `src/mcp/server.ts`, `src/storage/database.ts`, `src/execution/derivatives.ts`; `PROGRESS.md`.
+- Проверки: `npm.cmd run test:mcp` — `PASS`: build `PASS`, 1 test, 0 failures. SQLite experimental warning ожидаем. Полный offline acceptance — `NOT_RUN`; live API и внешние изменения не выполнялись.
+- Ограничения/остаток: нужно выполнить полный offline acceptance, затем обновить итоговый handoff и остановиться на этом подпункте.
+- Следующий шаг: выполнить `npm.cmd run test:acceptance:offline`.
+
+### STEP-0152 — 2026-09-07 — derived preview/poster offline acceptance PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; выбранный derived preview/poster подпункт готов локально, работа по нему почти завершена.
+- Изменения и назначение: полная offline regression подтвердила migration 5, derivative storage, MCP resource registration и отсутствие regressions в graph/project/execution/catalog paths.
+- Файлы/модули: `src/execution/derivatives.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`; rebuilt `dist/`; `PROGRESS.md`.
+- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 14, L06 6, MCP 1; всего 38 tests, 0 failures. Внутренние build шаги — `PASS`; SQLite experimental warnings ожидаемы. Live API, submit/upload/cancel и пользовательские assets не выполнялись.
+- Доказательства: L06 image preview и video poster созданы локально через ffmpeg; повтор derivative не создаёт новую запись; MCP transport читает derived PNG; submit count остаётся `0`.
+- Ограничения/остаток: live preview/poster на конкретном RunningHub output не выполнялся; ffmpeg должен быть доступен локально, audio derivative отсутствует. Manifests/outbox, review events, changes-requested revisions, approval и chain gate остаются TODO.
+- Следующий шаг: выполнить финальный `npm.cmd run typecheck` и `git diff --check`, затем завершить только этот L06 подпункт и остановиться.
+
+### STEP-0153 — 2026-09-07 — финальная проверка derived preview/poster
+
+- Пакет и статус: L06 / `LOCAL_DONE` для выбранного derived preview/poster подпункта; весь L06 остаётся `IN_PROGRESS`, работа остановлена.
+- Изменения и назначение: итоговое состояние исходников, тестов, документации и rebuilt `dist/` сверено; пользовательские изменения в `LUNA_START_HERE.md`, компактном журнале/архиве, плане и ранее затронутых файлах не откатывались, commit/staging не выполнялись.
+- Файлы/модули: новый `src/execution/derivatives.ts`; `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`; rebuilt `dist/`; `PROGRESS.md`.
+- Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run test:l06` — `PASS` (6 tests); `npm.cmd run test:mcp` — `PASS` (1 test); `npm.cmd run test:acceptance:offline` — `PASS` (38 tests, 0 failures); `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings. Live API, платные генерации, upload/cancel и пользовательские assets — `NOT_RUN`.
+- Доказательства: image preview и video first-frame poster созданы локально и повторно переиспользованы по source hash; MCP `resources/read` проверил derived PNG; synthetic/offline evidence не выдаётся за live provider evidence.
+- Ограничения/остаток: live preview/poster compatibility отдельно не проверялась; требуется локальный ffmpeg, audio derivatives не создаются. Manifests/outbox, review events, changes-requested revisions, approval и chain gate остаются TODO.
+- Следующий шаг: в новой отдельной задаче выбрать manifests/outbox как следующий конкретный L06 подпункт; автоматически не начинать.
+
+### STEP-0154 — 2026-09-07 — выбран подпункт manifests/outbox
+
+- Пакет и статус: L06 / `IN_PROGRESS`; выбран только manifests/outbox.
+- Изменения и назначение: после уже реализованных original/preview/poster paths добавить immutable project-local `manifest.json` с hashes, graph/revision snapshot, asset bindings, provider task/output metadata и review status `NOT_READY`; публикацию сделать через идемпотентный SQLite outbox без секретов и абсолютных путей.
+- Файлы/модули: на момент записи изменён только `PROGRESS.md`; runtime и тесты ещё не изменялись.
+- Проверки: реализация, typecheck, build и tests — `NOT_RUN`; live API, платные генерации, upload/cancel и пользовательские assets не выполняются.
+- Ограничения/остаток: review events, changes-requested revisions, approval и chain gate не входят в выбранный подпункт.
+- Следующий шаг: добавить manifest service, outbox persistence и MCP integration, затем проверить повторную публикацию через offline transport.
+
+### STEP-0155 — 2026-09-07 — добавлен manifest/outbox path
+
+- Пакет и статус: L06 / `IN_PROGRESS`; manifests/outbox implementation добавлена, проверки не завершены.
+- Изменения и назначение: migration 6 добавила unique `(kind, aggregate_id)` outbox key; `ResultManifestService` атомарно сохраняет `.runninghub/runs/<job_id>/manifest.json`, фиксирует graph/revision hashes и snapshots, ordered asset hashes, backend/task/output metadata и `review=NOT_READY`, затем проверяет integrity и отмечает идемпотентное `result_manifest` событие опубликованным. `rh_get_results` теперь возвращает manifest publication metadata.
+- Файлы/модули: `src/storage/database.ts`, новый `src/execution/manifests.ts`, `src/mcp/server.ts`, `PROGRESS.md`.
+- Проверки: `npm.cmd run typecheck`, build, L06/offline tests — `NOT_RUN` после изменения; live API, submit/upload/cancel и пользовательские assets не выполнялись.
+- Ограничения/остаток: нужно проверить отсутствие provider refs/absolute project paths в manifest, повторный MCP вызов и pending outbox republish; review/approval/chain gate не реализуются.
+- Следующий шаг: выполнить `npm.cmd run typecheck` и исправить только diagnostics manifests/outbox path.
+
+### STEP-0156 — 2026-09-07 — исправлен тип derived rows в manifest builder
+
+- Пакет и статус: L06 / `IN_PROGRESS`; compile fix для manifests/outbox.
+- Изменения и назначение: builder теперь принимает durable `DerivedResultRow` и корректно маппит его `id` в manifest `derived_id`; runtime scope не расширен.
+- Файлы/модули: `src/execution/manifests.ts`, `PROGRESS.md`.
+- Проверки: первый `npm.cmd run typecheck` после implementation — `FAIL` только по несовпадению `DerivedResultRow`/`DerivedResult`; после точечного исправления повторный typecheck — `NOT_RUN`.
+- Ограничения/остаток: build и tests ещё не выполнялись; live API и внешние изменения не затрагивались.
+- Следующий шаг: повторить `npm.cmd run typecheck`.
+
+### STEP-0157 — 2026-09-07 — manifests/outbox typecheck PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; manifest/outbox path компилируется.
+- Изменения и назначение: строгая TypeScript-проверка migration, outbox methods, manifest builder и MCP integration прошла без diagnostics.
+- Файлы/модули: `src/storage/database.ts`, `src/execution/manifests.ts`, `src/mcp/server.ts`, `PROGRESS.md`.
+- Проверки: `npm.cmd run typecheck` — `PASS`. Build, L06 и полный offline acceptance — `NOT_RUN`; live API, submit/upload/cancel и пользовательские assets не выполнялись.
+- Ограничения/остаток: нужны runtime tests manifest file, no secret/provider reference, idempotent outbox и повторный MCP call.
+- Следующий шаг: добавить offline assertions в существующий `tests/results/l06.test.mjs` и обновить migration expectation в `tests/unit/storage.test.mjs`.
+
+### STEP-0158 — 2026-09-07 — добавлены manifest/outbox offline assertions
+
+- Пакет и статус: L06 / `IN_PROGRESS`; тестовый контракт manifests/outbox добавлен.
+- Изменения и назначение: storage unit expectation переведён на migration 6; L06 MCP transport test проверяет manifest file under `.runninghub/runs`, graph/output/review metadata, отсутствие project root/API key/provider URL, published outbox event и повторную публикацию после искусственного pending state без submit.
+- Файлы/модули: `tests/unit/storage.test.mjs`, `tests/results/l06.test.mjs`, `src/execution/manifests.ts`, `PROGRESS.md`.
+- Проверки: после добавления assertions typecheck/build/L06 tests — `NOT_RUN`; live API и пользовательские assets не используются.
+- Ограничения/остаток: нужно выполнить L06 runtime test и исправить только связанные failures; review loop не входит в шаг.
+- Следующий шаг: выполнить `npm.cmd run test:l06`.
+
+### STEP-0159 — 2026-09-07 — manifests/outbox L06 tests PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; runtime contract manifests/outbox подтверждён локально.
+- Изменения и назначение: build успешно собрал migration 6 и `ResultManifestService`; MCP test создал manifest, проверил hash-linked output metadata и review `NOT_READY`, затем повторно опубликовал pending outbox row без provider submit.
+- Файлы/модули: rebuilt `dist/`; `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:l06` — `PASS`, build `PASS`, 6 tests, 0 failures. SQLite experimental warning ожидаем. Полный offline acceptance — `NOT_RUN`; live API и внешние изменения не выполнялись.
+- Ограничения/остаток: нужна общая regression, explicit typecheck и diff check; manifest provider compatibility не является live evidence. Review events/approval/chain gate остаются TODO.
+- Следующий шаг: выполнить `npm.cmd run test:unit` и `npm.cmd run test:mcp` для migration/outbox и stdio regression.
+
+### STEP-0160 — 2026-09-07 — storage migration regression PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; SQLite migration 6 regression подтверждена.
+- Изменения и назначение: unit suite подтвердил повторное применение migration 6 и сохранение table count; outbox unique index не создаёт лишнюю таблицу.
+- Файлы/модули: rebuilt `dist/`; `src/storage/database.ts`, `tests/unit/storage.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:unit` — `PASS`, build `PASS`, 3 tests, 0 failures. SQLite experimental warning ожидаем. `test:mcp` и full acceptance — `NOT_RUN`; live API не выполнялся.
+- Ограничения/остаток: stdio tool flow и полный offline regression ещё не проверены; review loop остаётся вне scope.
+- Следующий шаг: выполнить `npm.cmd run test:mcp`.
+
+### STEP-0161 — 2026-09-07 — stdio MCP regression PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; manifests/outbox registration не нарушила stdio flow.
+- Изменения и назначение: initialize/tools-list/local tool calls продолжают работать после migration 6 и подключения manifest publication к `rh_get_results`.
+- Файлы/модули: rebuilt `dist/`; `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/mcp/stdio.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:mcp` — `PASS`, build `PASS`, 1 test, 0 failures. SQLite experimental warning ожидаем. Full offline acceptance — `NOT_RUN`; live API и внешние изменения не выполнялись.
+- Ограничения/остаток: нужен финальный typecheck, full offline acceptance и `git diff --check`; review/approval/chain gate не реализуются.
+- Следующий шаг: выполнить `npm.cmd run test:acceptance:offline`.
+
+### STEP-0162 — 2026-09-07 — manifests/outbox offline acceptance PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; выбранный manifests/outbox подпункт локально готов, финальные checks ещё впереди.
+- Изменения и назначение: full offline acceptance подтвердил migration 6, immutable manifest publication, idempotent pending outbox republish и отсутствие regressions в catalog/graph/project/execution/MCP paths.
+- Файлы/модули: `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`; rebuilt `dist/`; `PROGRESS.md`.
+- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 14, L06 6, MCP 1; всего 38 tests, 0 failures. Внутренние build шаги — `PASS`; SQLite experimental warnings ожидаемы. Live API и внешние изменения не выполнялись.
+- Ограничения/остаток: manifest сохраняет review `NOT_READY`; review events/approval/chain gate не реализуются. Нужны финальные typecheck и `git diff --check`.
+- Следующий шаг: выполнить `npm.cmd run typecheck`, затем `git diff --check`.
+
+### STEP-0163 — 2026-09-07 — финальный manifests/outbox typecheck PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; runtime/test path готов локально, documentation sync и diff check ещё впереди.
+- Изменения и назначение: строгая компиляция после всех manifest/outbox implementation и test changes прошла без diagnostics.
+- Файлы/модули: `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, tests; `PROGRESS.md`.
+- Проверки: `npm.cmd run typecheck` — `PASS`. После этой проверки documentation sync и `git diff --check` — `NOT_RUN`; live API и внешние изменения не выполнялись.
+- Ограничения/остаток: README/capability matrix ещё содержат прежнее «manifests not implemented» описание; review loop остаётся TODO.
+- Следующий шаг: синхронизировать только manifest/outbox documentation, затем повторить build, relevant tests и `git diff --check`.
+
+### STEP-0164 — 2026-09-07 — синхронизирована документация manifests/outbox
+
+- Пакет и статус: L06 / `IN_PROGRESS`; documentation sync завершена, финальные runtime checks ещё не выполнены.
+- Изменения и назначение: README, capability matrix, configuration и `rh_get_capabilities` теперь отражают local manifest/outbox support; audio derivatives и review/chain gate остаются явно неподдержанными.
+- Файлы/модули: `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `src/mcp/server.ts`, `PROGRESS.md`.
+- Проверки: после документационной/runtime capability правки build, typecheck, tests и `git diff --check` — `NOT_RUN`; live API и внешние изменения не выполнялись.
+- Ограничения/остаток: нужно подтвердить финальное исходное состояние; review events/approval/chain gate не реализуются.
+- Следующий шаг: выполнить `npm.cmd run typecheck`, затем `npm.cmd run build`.
+
+### STEP-0165 — 2026-09-07 — typecheck после документации PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; финальная проверка manifests/outbox продолжается.
+- Изменения и назначение: строгая компиляция после capability update прошла без diagnostics.
+- Файлы/модули: `src/mcp/server.ts`, `src/execution/manifests.ts`, `src/storage/database.ts`, `README.md`, docs; `PROGRESS.md`.
+- Проверки: `npm.cmd run typecheck` — `PASS`. Production build, relevant tests и `git diff --check` — `NOT_RUN`; live API и внешние изменения не выполнялись.
+- Ограничения/остаток: требуется пересобрать `dist/` после последнего source update и повторить tests.
+- Следующий шаг: выполнить `npm.cmd run build`.
+
+### STEP-0166 — 2026-09-07 — финальный build manifests/outbox PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; `dist/` синхронизирован с manifests/outbox implementation.
+- Изменения и назначение: production TypeScript build успешно собрал migration 6, `ResultManifestService` и updated capability response.
+- Файлы/модули: rebuilt `dist/`; `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, docs; `PROGRESS.md`.
+- Проверки: `npm.cmd run build` — `PASS`. После последнего source/docs update L06, full acceptance и `git diff --check` — `NOT_RUN`; live API не выполнялся.
+- Ограничения/остаток: нужны финальные L06/MCP/full offline regression и diff check; review loop остаётся TODO.
+- Следующий шаг: выполнить `npm.cmd run test:l06`.
+
+### STEP-0167 — 2026-09-07 — финальный L06 manifests/outbox test PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; selected manifests/outbox runtime test остаётся зелёным после docs/capability update.
+- Изменения и назначение: L06 suite повторно подтвердил originals, derived resources, manifest persistence and pending outbox republish without a second submit.
+- Файлы/модули: rebuilt `dist/`; `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, docs; `PROGRESS.md`.
+- Проверки: `npm.cmd run test:l06` — `PASS`, build `PASS`, 6 tests, 0 failures. SQLite experimental warning ожидаем. Full acceptance и `git diff --check` — `NOT_RUN`; live API не выполнялся.
+- Ограничения/остаток: нужна финальная stdio/full offline regression и whitespace/diff check; review events/approval/chain gate не реализуются.
+- Следующий шаг: выполнить `npm.cmd run test:mcp`, затем `npm.cmd run test:acceptance:offline`.
+
+### STEP-0168 — 2026-09-07 — финальный MCP stdio test PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; stdio regression после capability update пройдена.
+- Изменения и назначение: MCP initialize/tools-list/local execution flow остаётся рабочим с новым manifest/outbox capability response.
+- Файлы/модули: rebuilt `dist/`; `src/mcp/server.ts`, `src/execution/manifests.ts`, tests; `PROGRESS.md`.
+- Проверки: `npm.cmd run test:mcp` — `PASS`, build `PASS`, 1 test, 0 failures. SQLite experimental warning ожидаем. Full offline acceptance и `git diff --check` — `NOT_RUN`; live API не выполнялся.
+- Ограничения/остаток: требуется финальная полная regression; review loop не реализуется в этом пункте.
+- Следующий шаг: выполнить `npm.cmd run test:acceptance:offline`.
+
+### STEP-0169 — 2026-09-07 — финальный manifests/outbox acceptance PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; выбранный manifests/outbox подпункт готов локально, остаётся только diff check и handoff.
+- Изменения и назначение: полная offline regression после documentation/capability sync прошла без regressions; MCP path по-прежнему пишет и переиздаёт manifest через outbox без нового submit.
+- Файлы/модули: `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`; rebuilt `dist/`; `PROGRESS.md`.
+- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 14, L06 6, MCP 1; всего 38 tests, 0 failures. Все внутренние build шаги — `PASS`; SQLite experimental warnings ожидаемы. Live API, submit/upload/cancel и пользовательские assets не выполнялись.
+- Ограничения/остаток: review events/approval/chain gate и audio derivatives остаются TODO; live manifest compatibility отдельно не проверялась и не подменена offline evidence. Нужен `git diff --check`.
+- Следующий шаг: выполнить `git diff --check`, затем завершить выбранный подпункт и остановиться.
+
+### STEP-0170 — 2026-09-07 — manifests/outbox подпункт завершён
+
+- Пакет и статус: L06 / `LOCAL_DONE` для manifests/outbox; весь L06 остаётся `IN_PROGRESS`, работа остановлена по правилу сессии.
+- Изменения и назначение: `rh_get_results` теперь атомарно создаёт immutable `.runninghub/runs/<job_id>/manifest.json` с graph/revision/asset/backend/task/output hashes и `review=NOT_READY`; SQLite outbox обеспечивает уникальное `result_manifest` событие и повторную публикацию pending записи с integrity check. Секреты, signed/provider URLs и абсолютный project root в manifest не сохраняются.
+- Файлы/модули: новый `src/execution/manifests.ts`; `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `PROGRESS.md`; rebuilt `dist/`.
+- Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; `npm.cmd run test:l06` — `PASS` (6 tests); `npm.cmd run test:mcp` — `PASS` (1 test); `npm.cmd run test:acceptance:offline` — `PASS` (38 tests, 0 failures); `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings. SQLite experimental warnings ожидаемы. Live API, платные генерации, upload/cancel и пользовательские assets — `NOT_RUN`.
+- Доказательства: offline MCP transport реально создаёт manifest, проверяет output hash/review status/no secret or absolute root, затем после сброса `published_at` повторно публикует тот же outbox event без второго submit; synthetic/offline evidence не выдаётся за live compatibility.
+- Ограничения/остаток: review events, changes-requested revisions, approval и chain gate не реализованы; audio derivatives отсутствуют; live manifest compatibility отдельно не проверялась.
+- Следующий шаг: в новой отдельной задаче выбрать review events/manifest review state; автоматически не начинать.

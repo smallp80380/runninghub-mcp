@@ -91,9 +91,10 @@ test("stdio MCP initialize, catalog, graph, and local execution tools work", asy
        "rh_search_workflows",
        "rh_import_workflow",
        "rh_prepare_generation",
-      "rh_run_workflow",
-      "rh_job",
-      "rh_get_capabilities",
+       "rh_run_workflow",
+       "rh_job",
+       "rh_get_results",
+       "rh_get_capabilities",
     ]);
 
     child.stdin.write(frame({

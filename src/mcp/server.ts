@@ -1,14 +1,19 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ResourceLink } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { WorkflowApiClient } from "../backends/workflow-api/client.js";
 import { type AppConfig } from "../config.js";
 import { AssetProvider } from "../execution/assets.js";
+import { DerivedMediaService, type DerivedResult } from "../execution/derivatives.js";
+import { ResultManifestService } from "../execution/manifests.js";
+import { ResultDownloadService } from "../execution/results.js";
 import { type ExecutionPlan } from "../execution/types.js";
 import { jobHandle, planFromRow, planToRow, DurableWorkflowRunner } from "../execution/runner.js";
-import { assetToolSchema, jobSchema, prepareGenerationSchema, runWorkflowSchema } from "../execution/schemas.js";
+import { assetToolSchema, getResultsSchema, jobSchema, prepareGenerationSchema, runWorkflowSchema } from "../execution/schemas.js";
 import { AppError, errorResult, jsonText, okResult } from "../errors.js";
 import { exportApiGraph, importApiGraph } from "../graph/codec.js";
 import { type GraphOperation } from "../graph/operations.js";
@@ -77,6 +82,90 @@ function stableJson(value: unknown): string {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function bytesSha256(value: Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function inside(root: string, candidate: string): boolean {
+  const value = relative(root, candidate);
+  return value !== "" && !value.startsWith("..") && !isAbsolute(value);
+}
+
+function resultUri(resultId: string): string {
+  return `runninghub://result/${encodeURIComponent(resultId)}`;
+}
+
+function resultResourceLink(result: { readonly result_id: string; readonly output_id: string; readonly mime: string }): ResourceLink {
+  return {
+    type: "resource_link",
+    uri: resultUri(result.result_id),
+    name: `${result.output_id} original`,
+    mimeType: result.mime,
+    description: "Validated local original output.",
+  };
+}
+
+function derivedUri(derivedId: string): string {
+  return `runninghub://derived/${encodeURIComponent(derivedId)}`;
+}
+
+function derivedResourceLink(derived: DerivedResult): ResourceLink {
+  return {
+    type: "resource_link",
+    uri: derivedUri(derived.derived_id),
+    name: `${derived.kind} for ${derived.result_id}`,
+    mimeType: derived.mime,
+    description: `Validated local derived ${derived.kind}.`,
+  };
+}
+
+function readStoredResource(
+  storage: Storage,
+  uri: URL,
+  row: { readonly id: string; readonly job_id: string; readonly relative_path: string; readonly mime: string; readonly size_bytes: number; readonly content_hash: string },
+) {
+  const job = storage.getJob(row.job_id);
+  if (!job) throw new AppError("PROJECT_NOT_FOUND", `Job ${row.job_id} was not found.`, { recoverable: false });
+  const plan = storage.getExecutionPlan(job.plan_id);
+  if (!plan) throw new AppError("PROJECT_NOT_FOUND", `Execution plan ${job.plan_id} was not found.`, { recoverable: false });
+  const project = storage.getProject(plan.project_id);
+  if (!project?.canonical_root) throw new AppError("INVALID_CONFIGURATION", `Project ${plan.project_id} has no canonical root.`, { recoverable: false });
+
+  const projectRoot = realpathSync(resolve(project.canonical_root));
+  const candidate = resolve(projectRoot, row.relative_path);
+  if (!inside(projectRoot, candidate) || !existsSync(candidate)) throw new AppError("DOWNLOAD_FAILED", `Stored result ${row.id} is unavailable.`, { recoverable: true });
+  const resultPath = realpathSync(candidate);
+  if (!inside(projectRoot, resultPath)) throw new AppError("DOWNLOAD_FAILED", `Stored result ${row.id} escapes the project root.`, { recoverable: false });
+  const bytes = readFileSync(resultPath);
+  if (bytes.length !== row.size_bytes || bytesSha256(bytes) !== row.content_hash) throw new AppError("DOWNLOAD_FAILED", `Stored result ${row.id} failed its integrity check.`, { recoverable: true });
+  return { contents: [{ uri: uri.toString(), mimeType: row.mime, blob: bytes.toString("base64") }] };
+}
+
+function readResultResource(storage: Storage, uri: URL, variables: Record<string, string | string[]>) {
+  const resultId = variables.result_id;
+  if (typeof resultId !== "string") throw new AppError("PROJECT_NOT_FOUND", "Result resource ID is invalid.", { recoverable: true });
+  const result = storage.getResultById(resultId);
+  if (!result) throw new AppError("PROJECT_NOT_FOUND", `Result ${resultId} was not found.`, { recoverable: true });
+  return readStoredResource(storage, uri, result);
+}
+
+function readDerivedResource(storage: Storage, uri: URL, variables: Record<string, string | string[]>) {
+  const derivedId = variables.derived_id;
+  if (typeof derivedId !== "string") throw new AppError("PROJECT_NOT_FOUND", "Derived resource ID is invalid.", { recoverable: true });
+  const derived = storage.getDerivedResultById(derivedId);
+  if (!derived) throw new AppError("PROJECT_NOT_FOUND", `Derived result ${derivedId} was not found.`, { recoverable: true });
+  const result = storage.getResultById(derived.result_id);
+  if (!result) throw new AppError("PROJECT_NOT_FOUND", `Original result ${derived.result_id} was not found.`, { recoverable: false });
+  return readStoredResource(storage, uri, {
+    id: derived.id,
+    job_id: result.job_id,
+    relative_path: derived.relative_path,
+    mime: derived.mime,
+    size_bytes: derived.size_bytes,
+    content_hash: derived.content_hash,
+  });
 }
 
 function configuredWorkflowBackend(config: AppConfig, profileId: string): WorkflowApiClient {
@@ -191,6 +280,19 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
   const workflowLibrary = new WorkflowLibrary(defaultWorkflowCards);
   const manifest = readCatalogManifest(config.catalogDir);
   const server = new McpServer({ name: "runninghub-mcp", version: "0.1.0" });
+
+  server.resource(
+    "result-output",
+    new ResourceTemplate("runninghub://result/{result_id}", { list: undefined }),
+    { description: "A validated local original result file." },
+    async (uri, variables) => readResultResource(storage, uri, variables),
+  );
+  server.resource(
+    "derived-output",
+    new ResourceTemplate("runninghub://derived/{derived_id}", { list: undefined }),
+    { description: "A validated local derived preview or video poster." },
+    async (uri, variables) => readDerivedResource(storage, uri, variables),
+  );
 
   server.tool(
     "rh_search_models",
@@ -561,6 +663,34 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
   );
 
   server.tool(
+    "rh_get_results",
+    "Download confirmed provider outputs as validated local original files and create local preview/poster derivatives without submitting another task.",
+    getResultsSchema,
+    async (input) => {
+      try {
+        const row = storage.getJob(input.job_id);
+        if (!row) throw new AppError("PROJECT_NOT_FOUND", `Job ${input.job_id} was not found.`, { recoverable: true });
+        const planRow = storage.getExecutionPlan(row.plan_id);
+        if (!planRow) throw new AppError("PROJECT_NOT_FOUND", `Execution plan ${row.plan_id} was not found.`, { recoverable: false });
+           const backend = configuredWorkflowBackend(config, planRow.backend_profile_id);
+           const results = await new ResultDownloadService(storage, backend).download(input.job_id);
+           const derived = await new DerivedMediaService(storage).derive(results.map((result) => result.result_id));
+           const manifest = new ResultManifestService(storage).create(input.job_id, backend.api_family);
+           const originalLinks = results.map(resultResourceLink);
+           const derivedLinks = derived.results.map(derivedResourceLink);
+           const enrichedResults = results.map((result, index) => ({
+             ...result,
+             resource_uri: originalLinks[index]?.uri,
+             derived: derived.results.filter((item) => item.result_id === result.result_id).map((item) => ({ ...item, resource_uri: derivedUri(item.derived_id) })),
+           }));
+           return { content: [jsonText(okResult({ job_id: input.job_id, results: enrichedResults, manifest }, [...derived.warnings])), ...originalLinks, ...derivedLinks] };
+      } catch (error) {
+        return { isError: true, content: [jsonText(errorResult(error))] };
+      }
+    },
+  );
+
+  server.tool(
     "rh_get_capabilities",
     "Report local server, catalog provenance, and backend capability evidence without exposing secrets.",
     {
@@ -593,8 +723,8 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
                   polling: config.workflowApi ? "configured_not_verified" : "capability_unknown",
                   upload: config.workflowApi?.routes.upload ? "configured_not_verified" : "capability_unknown",
                 },
-                supported_now: ["catalog_read", "payload_validation", "price_estimation", "local_graph_editing", "local_revisions", "api_graph_export", "project_context", "scene_resolution", "asset_hash_index", "asset_inspection", "asset_prepare", "workflow_library_search", "execution_plan_prepare", "job_status"],
-                not_yet_implemented: ["result_review"],
+                  supported_now: ["catalog_read", "payload_validation", "price_estimation", "local_graph_editing", "local_revisions", "api_graph_export", "project_context", "scene_resolution", "asset_hash_index", "asset_inspection", "asset_prepare", "workflow_library_search", "execution_plan_prepare", "job_status", "result_download", "result_resource_links", "result_preview", "result_poster", "result_manifest", "result_manifest_outbox"],
+                 not_yet_implemented: ["result_review", "review_gate"],
               }),
             ),
           ],

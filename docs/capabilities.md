@@ -14,4 +14,7 @@ This document describes the local L05 boundary. It is not a live account capabil
 | Durable execution plan, reservation, expiry reconciliation, and job recovery contracts | local synthetic | `tests/execution/l05.test.mjs`, `ACCEPTANCE.md` `L05-RECOVERY-002`; provider-specific expiry capability remains unknown until live evidence |
 | Project-owned asset inspection, hash guard, tagged upload/cache, and submit substitution | local synthetic + scoped live upload | `tests/execution/l05.test.mjs`, `tests/mcp/stdio.test.mjs`, `ACCEPTANCE.md` `L05-LIVE-003`; only a synthetic asset upload was live-verified |
 | Project-folder API workflow discovery/import | local | `rh_import_workflow`, `tests/projects/l04.test.mjs`; only API-format JSON is a candidate and cloud availability remains unknown |
-| Results/review | not implemented | L06 |
+| Result originals and MCP resource links | local | `rh_get_results` returns opaque `runninghub://result/<id>` links; `resources/read` rechecks project root and content hash |
+| Derived image previews and video posters | local | `DerivedMediaService` creates hash-aware PNG derivatives through fixed local ffmpeg invocation; `runninghub://derived/<id>` links are integrity-checked by `resources/read` |
+| Result manifests and outbox publication | local | `ResultManifestService`, `.runninghub/runs/<job_id>/manifest.json`, migration 6 and L06 transport test |
+| Result review and chain gate | not implemented | L06 |
