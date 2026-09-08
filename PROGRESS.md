@@ -504,3 +504,84 @@
 - Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 15, L06 7, MCP 1, всего 40 тестов, 0 failures; SQLite experimental warnings ожидаемы. `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings; live API, платные генерации, upload пользовательских данных и внешние изменения — `NOT_RUN`.
 - Ограничения/остаток: natural expiry и account-wide compatibility остаются `NOT_RUN`; требуется отдельное явное разрешение и выбранные case IDs.
 - Следующий шаг: остановиться до получения live scope/IDs; новые live calls и L07/L08 не начинать автоматически.
+
+### STEP-0225 — 2026-09-07 — live scope отсутствует в текущем процессе
+
+- Пакет и статус: L05 / `LIVE_PENDING`; следующий пункт не может быть выполнен без внешнего live scope.
+- Изменения и назначение: повторно проверен handoff и фактическое окружение текущего процесса; `RUNNINGHUB_WORKFLOW_API_KEY` не установлен, `RUNNINGHUB_LIVE_CASES` пуст, новые workflow/task IDs не переданы.
+- Файлы/модули: `PROGRESS.md`.
+- Проверки: проверка наличия переменных без вывода секрета — `PASS` (`key_set=False`, `live_cases=`); `git diff --check` — `PASS` с ожидаемым LF→CRLF warning; live API, платные генерации, upload пользовательских данных и внешние изменения — `NOT_RUN`; typecheck/build/tests — `NOT_RUN`, runtime-код не менялся.
+- Ограничения/остаток: natural expiry требует явно выбранного provider task ID и разрешения на status/wait scope; account-wide compatibility требует явно выбранных дополнительных workflow IDs и разрешения на соответствующие probes.
+- Следующий шаг: предоставить в текущем процессе live env и конкретный разрешённый scope/IDs; до этого не запускать API и не переходить к L07/L08.
+
+### STEP-0226 — 2026-09-07 — получены workflow IDs для live scope
+
+- Пакет и статус: L05 / `LIVE_PENDING`; account-wide probe scope уточнён, платные вызовы ещё не разрешены явно.
+- Изменения и назначение: получены два выбранных workflow ID `2097177175284154370` и `2095706794198106113` из RunningHub links. Они подходят для scoped account-wide workflow checks, но не заменяют task ID для natural expiry.
+- Файлы/модули: `PROGRESS.md`.
+- Проверки: формат обоих workflow IDs — `PASS`; provider API, schema fetch, submit, polling, outputs, upload и внешние изменения — `NOT_RUN` до явного выбора probe mode и разрешения.
+- Ограничения/остаток: нужно явно разрешить read-only schema inspection либо платный ephemeral submit/status/output probe и указать, проверять один или оба workflow ID. Natural expiry остаётся без подходящего активного task ID.
+- Следующий шаг: получить явное разрешение и выбранный режим live-проверки; не запускать provider requests автоматически.
+
+### STEP-0227 — 2026-09-07 — один дополнительный workflow live probe PASS
+
+- Пакет и статус: L05 / `LIVE_PENDING`; один явно разрешённый probe для workflow `2097177175284154370` завершён успешно.
+- Изменения и назначение: через production durable runner выполнены один submit, polling и output query; provider task `2097179243626987522` достиг `outputs_ready=true`. Пользовательские assets не загружались, второй выбранный workflow не запускался.
+- Файлы/модули: `PROGRESS.md`; runtime-код и live harness не изменялись.
+- Проверки: `npm.cmd run test:live -- --workflow-id 2097177175284154370 --timeout-ms 300000` с user-scoped env — `PASS`; `LIVE_SUBMIT` и `LIVE_PASS` получены, API key не выводился. Natural expiry, второй workflow, account-wide compatibility и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: успешный probe доказывает только эту комбинацию workflow/profile и не доказывает natural expiry или account-wide compatibility; provider task ID сохранён только в этом журнале.
+- Следующий шаг: остановиться и не запускать второй workflow или новые платные probes без отдельного разрешения; natural expiry требует отдельного активного task scope.
+
+### STEP-0228 — 2026-09-07 — дополнительный probe локально проверен
+
+- Пакет и статус: L05 / `LIVE_PENDING`; разрешённый probe из STEP-0227 подтверждён, scope остаётся ограниченным одним workflow.
+- Изменения и назначение: после live evidence проверены parser/build и весь offline acceptance; второй workflow и новые provider requests не выполнялись.
+- Файлы/модули: `PROGRESS.md`; `dist/` пересобран штатными build/test-командами.
+- Проверки: `node --check scripts/test-live.mjs` — `PASS`; `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 15, L06 7, MCP 1, всего 40 тестов, 0 failures; `git diff --check` — `PASS` с ожидаемым LF→CRLF warning. SQLite experimental warnings ожидаемы.
+- Ограничения/остаток: natural expiry, второй workflow `2095706794198106113` и account-wide compatibility — `NOT_RUN`; успешный probe не является доказательством expiry или account-wide coverage.
+- Следующий шаг: остановиться до отдельного разрешения на второй workflow либо на read-only/expiry scope; автоматически новые live calls не запускать.
+
+### STEP-0229 — 2026-09-07 — второй workflow отложен по подтверждённому scope
+
+- Пакет и статус: L05 / `LIVE_PENDING`; пользователь подтвердил не запускать второй workflow для текущего пункта.
+- Изменения и назначение: текущий один workflow probe считается достаточным для выбранного scope; `account-wide compatibility` намеренно остаётся `NOT_RUN` и не объявляется доказанной.
+- Файлы/модули: `PROGRESS.md`.
+- Проверки: решение scope зафиксировано; новые live API calls, платные генерации, upload и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: natural expiry требует отдельного provider task scope; второй workflow и account-wide compatibility отложены.
+- Следующий шаг: остановиться на завершённом scope; не запускать второй workflow или новый пакет автоматически.
+
+### STEP-0230 — 2026-09-07 — scope второго workflow явно разрешён
+
+- Пакет и статус: L05 / `LIVE_PENDING`; предыдущая интерпретация подтверждения исправлена.
+- Изменения и назначение: пользователь явно разрешил один дополнительный платный submit/status/output probe для workflow `2095706794198106113`; upload пользовательских данных не входит в scope.
+- Файлы/модули: `PROGRESS.md`.
+- Проверки: scope и workflow ID зафиксированы; provider API и новый live probe — `NOT_RUN` на момент записи; второй workflow будет запущен ровно один раз.
+- Ограничения/остаток: natural expiry остаётся отдельным непроверенным пунктом; account-wide compatibility будет оцениваться только по двум явно выбранным workflow, без расширения до полного аккаунта.
+- Следующий шаг: проверить user-scoped env и выполнить единственный разрешённый probe workflow `2095706794198106113`.
+
+### STEP-0231 — 2026-09-07 — второй workflow live probe PASS
+
+- Пакет и статус: L05 / `LIVE_PENDING`; второй явно разрешённый workflow probe завершён успешно.
+- Изменения и назначение: через production durable runner выполнены один submit, polling и output query для workflow `2095706794198106113`; provider task `2097181200402653185` достиг `outputs_ready=true`. Пользовательские assets не загружались.
+- Файлы/модули: `PROGRESS.md`; runtime-код и live harness не изменялись.
+- Проверки: `npm.cmd run test:live -- --workflow-id 2095706794198106113 --timeout-ms 300000` с user-scoped env — `PASS`; API key не выводился. Новые live calls после этого probe — `NOT_RUN`.
+- Ограничения/остаток: два выбранных workflow/profile имеют scoped evidence, но это не доказывает account-wide compatibility; natural expiry остаётся `NOT_RUN`.
+- Следующий шаг: выполнить локальные syntax/typecheck/build/offline/diff проверки и остановиться; natural expiry не запускать автоматически.
+
+### STEP-0232 — 2026-09-07 — второй workflow probe локально проверен
+
+- Пакет и статус: L05 / `LIVE_PENDING`; два явно выбранных workflow имеют scoped submit/status/output evidence.
+- Изменения и назначение: после второго live probe проверены parser/build и весь offline acceptance; новых provider requests не выполнялось.
+- Файлы/модули: `PROGRESS.md`; `dist/` пересобран штатными build/test-командами.
+- Проверки: `node --check scripts/test-live.mjs` — `PASS`; `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 15, L06 7, MCP 1, всего 40 тестов, 0 failures; `git diff --check` — `PASS` с ожидаемым LF→CRLF warning. SQLite experimental warnings ожидаемы.
+- Ограничения/остаток: natural expiry и полная account-wide compatibility — `NOT_RUN`; два workflow подтверждают только выбранные workflow/profile combinations.
+- Следующий шаг: остановиться на завершённом выбранном scope; не запускать natural expiry, дополнительные workflow или новый пакет автоматически.
+
+### STEP-0233 — 2026-09-07 — outputs двух live probes read-only показаны
+
+- Пакет и статус: L05 / `LIVE_PENDING`; результаты обоих разрешённых workflow probes получены без новых submit.
+- Изменения и назначение: read-only output query и download по task `2097179243626987522` и task `2097181200402653185`; локально извлечены representative image/first frames для показа. Provider task state не изменялся.
+- Файлы/модули: `PROGRESS.md`; временные output copies находятся вне репозитория в approved temp directory и не являются проектными файлами.
+- Проверки: первый task — image 642586 bytes, video 5.0625 s / 576x832 (1088469 bytes), ZIP с PNG 11661 bytes; второй task — video 8 s / 1280x736 с AAC audio (3578694 bytes); `ffprobe` и `ffmpeg` first-frame extraction — `PASS`. Новые submit, upload пользовательских данных и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: визуально показаны representative image/frames, а не полный просмотр движения видео; natural expiry и полная account-wide compatibility остаются `NOT_RUN`.
+- Следующий шаг: остановиться на завершённом выбранном scope; новые live calls не запускать автоматически.
