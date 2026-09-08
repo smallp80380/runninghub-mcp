@@ -98,6 +98,60 @@ test("concurrent calls for one plan create one job and one submit", async () => 
   }
 });
 
+test("review chain gate blocks active and unreviewed work, then releases after review", async () => {
+  const h = createHarness();
+  try {
+    const first = await h.runner.run(h.plan, "chain-request-1");
+    const repeated = await h.runner.run(h.plan, "chain-request-retry");
+    assert.equal(repeated.id, first.id);
+
+    const chainId = h.context.getWorkItem(h.plan.work_item_id).chain_id;
+    const nextWorkItem = h.context.createWorkItem({ project_id: "execution-project", chain_id: chainId, user_request: "next chain step", request_kind: "image" });
+    const nextRevision = h.revisions.createWorkflow({ project_id: "execution-project", workflow_id: `workflow-${nextWorkItem.id}` });
+    const nextPlan = { ...h.plan, id: `plan-${nextWorkItem.id}`, work_item_id: nextWorkItem.id, graph_revision_id: nextRevision.revision_id, graph_hash: nextRevision.graph_hash };
+
+    await assert.rejects(
+      () => h.runner.run(nextPlan, "chain-request-2"),
+      (error) => error?.code === "REVIEW_PENDING" && error.context?.reason === "execution_active",
+    );
+    assert.equal(h.storage.getJobByPlan(nextPlan.id), undefined);
+
+    h.storage.markProviderStatus(first.id, "SUCCESS", "READY");
+    h.storage.saveResult({
+      id: "chain-result-1",
+      job_id: first.id,
+      output_id: "output-1",
+      schema_version: "1",
+      relative_path: "outputs/chain-result-1.png",
+      mime: "image/png",
+      size_bytes: 1,
+      content_hash: "chain-result-hash",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    await assert.rejects(
+      () => h.runner.run(nextPlan, "chain-request-3"),
+      (error) => error?.code === "REVIEW_PENDING" && error.context?.reason === "review_pending",
+    );
+
+    h.storage.saveReviewEvent({
+      id: "chain-review-1",
+      job_id: first.id,
+      result_id: "chain-result-1",
+      output_hash: "chain-result-hash",
+      decision: "APPROVED",
+      feedback: null,
+      user_message_ref: "message-chain-1",
+      created_at: new Date().toISOString(),
+    });
+    const released = await h.runner.run(nextPlan, "chain-request-4");
+    assert.equal(released.execution_state, "RUNNING");
+    assert.equal(h.backend.submit_calls, 2);
+  } finally {
+    h.storage.close();
+  }
+});
+
 test("lost submit response becomes SUBMIT_UNKNOWN and is never retried blindly", async () => {
   const h = createHarness();
   h.backend.mode = "unknown";
@@ -328,7 +382,7 @@ test("registered asset upload is hash-checked, cached, and substituted into the 
     assert.ok(!backend.submitted_workflows[0].includes("asset://"));
     assert.ok(backend.submitted_workflows[0].includes("uploaded/reference.png"));
 
-    const secondWorkItem = context.createWorkItem({ project_id: "asset-project", user_request: "asset run again", request_kind: "image" });
+    const secondWorkItem = context.createWorkItem({ project_id: "asset-project", chain_id: "independent-upload-check", user_request: "asset run again", request_kind: "image" });
     const secondRevision = revisions.createWorkflow({ project_id: "asset-project", workflow_id: `workflow-${secondWorkItem.id}` });
     const secondPlan = { ...plan, id: `plan-${secondWorkItem.id}`, work_item_id: secondWorkItem.id, graph_revision_id: secondRevision.revision_id, graph_hash: secondRevision.graph_hash };
     await runner.run(secondPlan, "asset-request-2");

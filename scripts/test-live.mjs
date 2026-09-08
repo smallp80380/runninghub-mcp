@@ -1,4 +1,4 @@
-import { parse as parseLossless } from "lossless-json";
+import { parse as parseLossless, stringify as stringifyLossless } from "lossless-json";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +28,8 @@ const resultResourceProbe = process.argv.includes("--result-resource");
 const resizeNodeId = argumentValue("--resize-node-id");
 const resizeWidth = integerArgument("--resize-width");
 const resizeHeight = integerArgument("--resize-height");
+const durationSecondsArgument = argumentValue("--duration-seconds");
+const durationSeconds = durationSecondsArgument === undefined ? undefined : Number(durationSecondsArgument);
 const timeoutMs = Number(argumentValue("--timeout-ms") ?? "180000");
 
 if (!apiKey || liveCases !== "full") {
@@ -75,6 +77,12 @@ if (!apiKey || liveCases !== "full") {
 } else if (resultResourceProbe && (!taskId || !/^\d+$/.test(taskId))) {
   console.error("NOT_RUN: --result-resource requires an explicit numeric --task-id.");
   process.exitCode = 2;
+} else if (durationSecondsArgument !== undefined && (!Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > 60)) {
+  console.error("NOT_RUN: --duration-seconds must be a positive number no greater than 60.");
+  process.exitCode = 2;
+} else if (durationSeconds !== undefined && (uploadOnly || structuralGraph || cancelProbe || expiryProbe || resultResourceProbe)) {
+  console.error("NOT_RUN: --duration-seconds is supported only for the ephemeral generation probe.");
+  process.exitCode = 2;
 } else if (!uploadOnly && !taskId && !expiryProbe && !resultResourceProbe && (!workflowId || !/^\d+$/.test(workflowId))) {
   console.error("NOT_RUN: pass an explicit numeric --workflow-id for the ephemeral live probe.");
   process.exitCode = 2;
@@ -92,7 +100,7 @@ if (!apiKey || liveCases !== "full") {
           ? runStructuralGraphProbe(apiKey, workflowId, resizeNodeId, resizeWidth, resizeHeight, timeoutMs)
           : cancelProbe
             ? runCancelProbe(apiKey, workflowId)
-            : runProbe(apiKey, workflowId, timeoutMs));
+            : runProbe(apiKey, workflowId, timeoutMs, durationSeconds));
   } catch (error) {
     console.error(`LIVE_FAIL: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
@@ -145,9 +153,54 @@ async function runUploadProbe(apiKeyValue) {
   }
 }
 
-async function runProbe(apiKeyValue, remoteWorkflowId, waitTimeoutMs) {
+function overrideDuration(source, seconds) {
+  let parsed;
+  try {
+    parsed = parseLossless(source);
+  } catch {
+    throw new Error("workflow JSON could not be parsed for the duration override");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("workflow JSON is not an API-format graph object");
+  const graph = parsed;
+  const visited = new Set();
+  const setLinkedNumericSource = (link) => {
+    if (!Array.isArray(link) || link.length < 1) return false;
+    const id = String(link[0]);
+    if (visited.has(id)) return false;
+    visited.add(id);
+    const node = graph[id];
+    if (!node || typeof node !== "object" || !node.inputs || typeof node.inputs !== "object") return false;
+    if (/primitive(?:float|int)/i.test(String(node.class_type ?? "")) && Object.prototype.hasOwnProperty.call(node.inputs, "value")) {
+      node.inputs.value = seconds;
+      return true;
+    }
+    return Object.values(node.inputs).some((value) => setLinkedNumericSource(value));
+  };
+
+  let changed = false;
+  for (const node of Object.values(graph)) {
+    if (!node || typeof node !== "object" || !/image.*to.*video/i.test(String(node.class_type ?? "")) || !node.inputs || typeof node.inputs !== "object") continue;
+    for (const [name, value] of Object.entries(node.inputs)) {
+      if (!/duration|length/i.test(name)) continue;
+      if (typeof value === "number") {
+        node.inputs[name] = seconds;
+        changed = true;
+      } else if (setLinkedNumericSource(value)) {
+        changed = true;
+      }
+    }
+  }
+  if (!changed) throw new Error("could not find a linked numeric duration/length input in the video workflow");
+  const serialized = stringifyLossless(graph, null, 2);
+  if (typeof serialized !== "string") throw new Error("duration override could not serialize the workflow");
+  return serialized;
+}
+
+async function runProbe(apiKeyValue, remoteWorkflowId, waitTimeoutMs, durationSecondsValue) {
   const source = await getWorkflowJson(apiKeyValue, remoteWorkflowId);
-  const graph = importApiGraph(source);
+  const submittedSource = durationSecondsValue === undefined ? source : overrideDuration(source, durationSecondsValue);
+  if (durationSecondsValue !== undefined) console.error(`LIVE_DURATION_OVERRIDE: seconds=${durationSecondsValue}`);
+  const graph = importApiGraph(submittedSource);
   const storage = new Storage(":memory:");
   try {
     const projectId = "live-probe-memory";
@@ -175,7 +228,7 @@ async function runProbe(apiKeyValue, remoteWorkflowId, waitTimeoutMs) {
       work_item_id: workItem.id,
       graph_revision_id: revision.revision_id,
       graph_hash: revision.graph_hash,
-      workflow_json: source,
+      workflow_json: submittedSource,
       asset_bindings: [],
       requirements_hash: "ephemeral-live-probe",
       policy_hash: "ephemeral-live-probe",

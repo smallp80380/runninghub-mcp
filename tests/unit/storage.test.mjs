@@ -10,10 +10,10 @@ test("SQLite migrations are applied and reopening is idempotent", () => {
   const dbPath = join(dir, "state.sqlite");
   try {
     const first = new Storage(dbPath);
-    assert.deepEqual(first.health(), { migration_version: 6, table_count: 15 });
+    assert.deepEqual(first.health(), { migration_version: 7, table_count: 16 });
     first.close();
     const second = new Storage(dbPath);
-    assert.deepEqual(second.health(), { migration_version: 6, table_count: 15 });
+    assert.deepEqual(second.health(), { migration_version: 7, table_count: 16 });
     second.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

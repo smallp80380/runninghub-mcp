@@ -247,7 +247,8 @@ test("rh_get_results downloads through the MCP transport without submitting a ta
     assert.equal(manifest.schema_version, "1");
     assert.equal(manifest.project.project_id, "download-project");
     assert.equal(manifest.outputs[0].content_hash, payload.data.results[0].content_hash);
-    assert.equal(manifest.review.status, "NOT_READY");
+    assert.equal(manifest.review.status, "PENDING_REVIEW");
+    assert.equal(payload.data.review.status, "PENDING_REVIEW");
     assert.ok(manifest.workflow.submitted_workflow_hash);
     assert.equal(manifestText.includes(root), false);
     assert.equal(manifestText.includes("synthetic-key"), false);
@@ -267,16 +268,184 @@ test("rh_get_results downloads through the MCP transport without submitting a ta
     assert.equal(derivedResource.contents.length, 1);
     assert.equal(derivedResource.contents[0].mimeType, "image/png");
     assert.deepEqual(Buffer.from(derivedResource.contents[0].blob, "base64").subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    const reviewArguments = {
+      result_id: payload.data.results[0].result_id,
+      decision: "CHANGES_REQUESTED",
+      feedback: "Adjust the composition.",
+      user_message_ref: "message-1",
+      review_event_id: "review-event-1",
+      revision_request: {
+        reason: "Apply the composition feedback",
+        operations: [{ op: "add_node", node_id: "requested-change", class_type: "Source", schema_revision: "1" }],
+      },
+    };
+    const review = await client.callTool({ name: "rh_review_result", arguments: reviewArguments });
+    const reviewPayload = JSON.parse(review.content[0].text);
+    assert.equal(review.isError, undefined);
+    assert.equal(reviewPayload.ok, true);
+    assert.equal(reviewPayload.data.idempotent, false);
+    assert.equal(reviewPayload.data.review.status, "CHANGES_REQUESTED");
+    assert.equal(reviewPayload.data.changes_requested_revision.source_revision_id, seeded.plan.graph_revision_id);
+    assert.equal(reviewPayload.data.changes_requested_revision.revision.parent_revision_id, seeded.plan.graph_revision_id);
+    assert.equal(reviewPayload.data.changes_requested_revision.work_item.chain_id, storage.getWorkItem(seeded.plan.work_item_id).chain_id);
+    assert.notEqual(reviewPayload.data.changes_requested_revision.work_item.id, seeded.plan.work_item_id);
+    assert.equal(storage.getJob(job.id).execution_state, "SUCCEEDED");
+    assert.equal(storage.listReviewEvents(payload.data.results[0].result_id).length, 1);
+    const repeatedReview = await client.callTool({ name: "rh_review_result", arguments: reviewArguments });
+    const repeatedReviewPayload = JSON.parse(repeatedReview.content[0].text);
+    assert.equal(repeatedReviewPayload.ok, true);
+    assert.equal(repeatedReviewPayload.data.idempotent, true);
+    assert.equal(repeatedReviewPayload.data.changes_requested_revision.revision.revision_id, reviewPayload.data.changes_requested_revision.revision.revision_id);
+    assert.equal(repeatedReviewPayload.data.changes_requested_revision.work_item.id, reviewPayload.data.changes_requested_revision.work_item.id);
+    assert.equal(storage.listReviewEvents(payload.data.results[0].result_id).length, 1);
+    const invalidRevisionDecision = await client.callTool({ name: "rh_review_result", arguments: {
+      ...reviewArguments,
+      decision: "APPROVED",
+      review_event_id: "review-event-3",
+    } });
+    const invalidRevisionPayload = JSON.parse(invalidRevisionDecision.content[0].text);
+    assert.equal(invalidRevisionDecision.isError, true);
+    assert.equal(invalidRevisionPayload.error.code, "INVALID_CONFIGURATION");
+    const conflictingReview = await client.callTool({ name: "rh_review_result", arguments: { ...reviewArguments, decision: "APPROVED", review_event_id: "review-event-2", revision_request: undefined } });
+    const conflictingReviewPayload = JSON.parse(conflictingReview.content[0].text);
+    assert.equal(conflictingReview.isError, true);
+    assert.equal(conflictingReviewPayload.ok, false);
+    assert.equal(conflictingReviewPayload.error.code, "REQUEST_CONFLICT");
+    const reviewedResults = await client.callTool({ name: "rh_get_results", arguments: { job_id: job.id } });
+    const reviewedResultsPayload = JSON.parse(reviewedResults.content[0].text);
+    assert.equal(reviewedResultsPayload.data.review.status, "CHANGES_REQUESTED");
+    assert.equal(reviewedResultsPayload.data.results[0].review.status, "CHANGES_REQUESTED");
     storage.db.prepare("UPDATE outbox SET published_at = NULL WHERE id = ?").run(payload.data.manifest.outbox_id);
     const repeated = await client.callTool({ name: "rh_get_results", arguments: { job_id: job.id } });
     const repeatedPayload = JSON.parse(repeated.content[0].text);
     assert.equal(repeatedPayload.data.manifest.content_hash, payload.data.manifest.content_hash);
     assert.equal(storage.getOutbox(payload.data.manifest.outbox_id).published_at !== null, true);
     assert.equal(httpRequests.submit, 0);
-    assert.equal(httpRequests.output, 2);
+    assert.equal(httpRequests.output, 3);
     assert.equal(httpRequests.media, 1);
     await client.close();
     await server.close();
+  } finally {
+    if (client) await client.close().catch(() => undefined);
+    if (server) await server.close().catch(() => undefined);
+    httpServer.close();
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP review gate blocks by default and supports an explicit idempotent continuation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runninghub-mcp-review-gate-"));
+  const httpRequests = { submit: 0, output: 0, media: 0 };
+  const httpServer = createHttpServer((request, response) => {
+    if (request.url === "/submit") {
+      httpRequests.submit += 1;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ data: { taskId: `provider-next-${httpRequests.submit}` } }));
+      return;
+    }
+    if (request.url === "/outputs") {
+      httpRequests.output += 1;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ code: 0, data: { results: [{ id: "provider-output", fileUrl: `http://localhost:${httpServer.address().port}/media`, fileType: "image/png" }] } }));
+      return;
+    }
+    if (request.url === "/media") {
+      httpRequests.media += 1;
+      response.writeHead(200, { "content-type": "image/png", "content-length": validPng.length });
+      response.end(Buffer.from(validPng));
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  httpServer.listen(0, "127.0.0.1");
+  await once(httpServer, "listening");
+  const port = httpServer.address().port;
+  const dbPath = join(root, "state.sqlite");
+  const seeded = createProjectJob(root, "review-gate-profile", dbPath);
+  const storage = seeded.storage;
+  let server;
+  let client;
+  try {
+    const config = {
+      dataDir: root,
+      dbPath,
+      catalogDir: join(process.cwd(), "data", "upstream"),
+      profileId: "runninghub",
+      workflowApi: {
+        profile_id: "review-gate-profile",
+        base_url: `http://localhost:${port}`,
+        api_key: "synthetic-key",
+        routes: { submit: "/submit", status: "/status", outputs: "/outputs" },
+      },
+    };
+    server = createServer(config, storage);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "l06-review-gate", version: "0.1.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const downloaded = await client.callTool({ name: "rh_get_results", arguments: { job_id: seeded.job.id } });
+    const downloadedPayload = JSON.parse(downloaded.content[0].text);
+    assert.equal(downloadedPayload.ok, true);
+    assert.equal(downloadedPayload.data.review.status, "PENDING_REVIEW");
+
+    const chainId = seeded.projects.getWorkItem(seeded.plan.work_item_id).chain_id;
+    const revisions = new RevisionStore({ persistence: new SqliteRevisionPersistence(storage) });
+    const nextWorkItem = seeded.projects.createWorkItem({ project_id: "download-project", chain_id: chainId, user_request: "explicit next step", request_kind: "image" });
+    const nextRevision = revisions.createWorkflow({ project_id: "download-project", workflow_id: `workflow-${nextWorkItem.id}`, graph: createEmptyGraph() });
+    const nextPlan = { ...seeded.plan, id: `plan-${nextWorkItem.id}`, work_item_id: nextWorkItem.id, graph_revision_id: nextRevision.revision_id, graph_hash: nextRevision.graph_hash };
+    storage.saveExecutionPlan(planToRow(nextPlan));
+
+    const blocked = await client.callTool({ name: "rh_run_workflow", arguments: { plan_id: nextPlan.id, request_id: "explicit-next-request" } });
+    const blockedPayload = JSON.parse(blocked.content[0].text);
+    assert.equal(blocked.isError, true);
+    assert.equal(blockedPayload.error.code, "REVIEW_PENDING");
+    assert.equal(httpRequests.submit, 0);
+    assert.equal(storage.getJobByPlan(nextPlan.id), undefined);
+
+    const reviewed = await client.callTool({ name: "rh_review_result", arguments: {
+      result_id: downloadedPayload.data.results[0].result_id,
+      decision: "APPROVED",
+      user_message_ref: "message-approved-1",
+      review_event_id: "review-gate-event-1",
+    } });
+    const reviewedPayload = JSON.parse(reviewed.content[0].text);
+    assert.equal(reviewedPayload.ok, true);
+    assert.equal(httpRequests.submit, 0);
+
+    const armed = await client.callTool({ name: "rh_review_result", arguments: {
+      result_id: downloadedPayload.data.results[0].result_id,
+      decision: "APPROVED",
+      user_message_ref: "message-approved-1",
+      review_event_id: "review-gate-event-1",
+      continuation: { plan_id: nextPlan.id, request_id: "explicit-next-request" },
+    } });
+    const armedPayload = JSON.parse(armed.content[0].text);
+    assert.equal(armed.isError, undefined);
+    assert.equal(armedPayload.data.idempotent, true);
+    assert.equal(armedPayload.data.continuation.idempotent, false);
+    assert.equal(armedPayload.data.continuation.job.provider_task_id, "provider-next-1");
+    assert.equal(httpRequests.submit, 1);
+
+    const repeatedArmed = await client.callTool({ name: "rh_review_result", arguments: {
+      result_id: downloadedPayload.data.results[0].result_id,
+      decision: "APPROVED",
+      user_message_ref: "message-approved-1",
+      review_event_id: "review-gate-event-1",
+      continuation: { plan_id: nextPlan.id, request_id: "explicit-next-request" },
+    } });
+    const repeatedArmedPayload = JSON.parse(repeatedArmed.content[0].text);
+    assert.equal(repeatedArmed.isError, undefined);
+    assert.equal(repeatedArmedPayload.data.continuation.idempotent, true);
+    assert.equal(repeatedArmedPayload.data.continuation.job.id, armedPayload.data.continuation.job.id);
+    assert.equal(httpRequests.submit, 1);
+
+    const continued = await client.callTool({ name: "rh_run_workflow", arguments: { plan_id: nextPlan.id, request_id: "explicit-next-request" } });
+    const continuedPayload = JSON.parse(continued.content[0].text);
+    assert.equal(continued.isError, undefined);
+    assert.equal(continuedPayload.data.provider_task_id, "provider-next-1");
+    assert.equal(httpRequests.submit, 1);
   } finally {
     if (client) await client.close().catch(() => undefined);
     if (server) await server.close().catch(() => undefined);

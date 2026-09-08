@@ -8,20 +8,19 @@
 ## Текущее состояние
 
 - L00–L04: `LOCAL_DONE`.
-- L05: `LIVE_PENDING`. Durable execution, recovery, upload/cache, status/output/cancel и structural graph flow реализованы. Scoped live evidence получена для submit/status/output/upload/structural graph/cancel, active workflow и unknown-task not-found reconciliation.
-- L06: `IN_PROGRESS` — подпункты result download, MCP resource link, local derived image preview/video poster и manifests/outbox `LOCAL_DONE`; read-only live verification существующего output/resource path `PASS`: provider outputs скачиваются в локальные оригиналы с атомарной записью и MIME/container validation, а сохранённые результаты, derivatives и local manifest publication доступны через opaque MCP resource links/metadata. Review loop не реализован.
+- L05: `LIVE_PENDING`. Durable execution, recovery, upload/cache, status/output/cancel и structural graph flow реализованы; scoped live evidence получена для submit/status/output/upload/structural graph/cancel, active workflow и unknown-task not-found reconciliation.
+- L06: `LOCAL_DONE` для локального review loop. Result download, MCP resource links, local derived image preview/video poster, manifests/outbox, review events/manifest review state, changes-requested revision/work item, chain gate и явно запрошенный approval continuation — `LOCAL_DONE`; read-only live result/resource verification — `PASS`. Независимое automatic approval не реализуется.
 - L07: `TODO` — LoRA upload/bindings, media rules, cache expiry и server instructions.
 - L08: `TODO` — финальная live acceptance и проверка поставки.
 
 ## Что Проверено
 
-- `npm.cmd run typecheck` — PASS.
-- `npm.cmd run build` — PASS.
-- `npm.cmd run test:acceptance:offline` — PASS, 38 тестов.
-- Active live probe workflow `2087104558464446466` — PASS; provider task `2097126350429659137` завершена с `outputs_ready=true`.
-- Output query — `SUCCESS`, один MP4 output; URL не хранится в журнале.
-- Read-only live `rh_get_results` + `resources/read` — PASS; output сохранён как `video/quicktime`, URL не хранится в журнале.
-- Не проверены: natural expiry существующей задачи, account-wide compatibility, live preview/poster/manifest compatibility и review loop.
+- `npm.cmd run typecheck` — `PASS`.
+- `npm.cmd run build` — `PASS`.
+- `npm.cmd run test:acceptance:offline` — `PASS`, 40 тестов.
+- Review path `npm.cmd run typecheck` — `PASS`; `npm.cmd run test:l06` — `PASS`, 7 тестов.
+- Read-only live recovery/result/resource probes — `PASS`; один явно разрешённый short 2-second submit/status/output probe — `PASS`; пользовательские assets не загружались.
+- Не проверены: natural expiry существующей задачи, account-wide compatibility, live preview/poster/manifest/review compatibility и live chain-gate compatibility.
 
 ## Правила Сессии
 
@@ -32,651 +31,476 @@
 
 ## Handoff
 
-- Текущий пакет: L06 / `IN_PROGRESS`; result download, resource link, local derived preview/poster и manifests/outbox завершены локально, read-only live result/resource verification завершена.
-- Следующий шаг: в отдельной задаче выбрать review events/manifest review state как следующий L06 подпункт; автоматически его не начинать.
-- Repository bootstrap: commits `0ac69e9` и `9871e60`; после текущей архивации документационные изменения ещё не закоммичены.
+- Текущий пакет: L06 / `LOCAL_DONE` для explicit approval continuation; automatic approval остаётся намеренно неподдержанным.
+- Следующий шаг: в новой отдельной задаче выбрать следующий пункт по handoff; автоматически не начинать L07/L08.
+- Последний commit реализации: `ed648c2` (`Add L06 manifests and outbox`).
 
-### STEP-0101 — 2026-09-07 — compact active progress journal
+### STEP-0172 — 2026-09-07 — compact active progress journal
 
 - Пакет и статус: repository documentation / `LOCAL_DONE`.
-- Изменения и назначение: полная история до STEP-0100 перенесена в `docs/progress-archive-2026-09-07.md`; этот файл сокращён до текущего handoff, package status и обязательных правил. План обновлён под active journal + immutable archive.
-- Файлы/модули: `PROGRESS.md`, `docs/progress-archive-2026-09-07.md`, `RUNNINGHUB_MCP_IMPLEMENTATION_PLAN.md`.
-- Проверки: archive link и отсутствие рабочих Markdown-ссылок на `LUNA_START_HERE.md` — PASS; архив содержит 1084 строки и STEP-0100; `git diff --check` — PASS. Typecheck/build — `NOT_RUN`, поскольку изменение документационное.
-- Ограничения/остаток: изменения ещё не закоммичены; архив намеренно не является вторым активным журналом.
-- Следующий шаг: при необходимости создать отдельный commit компактного журнала и архива.
-
-### STEP-0102 — 2026-09-07 — выбран один локальный подпункт L06
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: выбран только result download: получить outputs уже существующей provider task, проверить URL/MIME и распознаваемый media container, атомарно сохранить оригиналы в output root проекта и сделать повтор загрузки безопасным. Preview, manifest/outbox, review и chain gate не начинаются.
-- Файлы/модули: на момент записи изменён только `PROGRESS.md`; исходники и provider/project state не изменялись.
-- Проверки: реализация и проверки — `NOT_RUN`; live API, submit, upload, cancel и пользовательские assets не выполняются.
-- Ограничения/остаток: result records/download service и MCP tool ещё не созданы; signed URL не должен попадать в журнал.
-- Следующий шаг: добавить локальный durable result-download service, storage records и один MCP tool, затем выполнить offline tests через stdio transport.
-
-### STEP-0103 — 2026-09-07 — добавлен локальный result download path
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: добавлена SQLite migration для локальных result records; `ResultDownloadService` получает outputs без submit, принимает provider bytes или скачивает URL без auth-заголовка, проверяет redirect host/scheme, лимит размера, MIME и PNG/JPEG/WebP/MP4/MOV/WAV/MP3 container structure, затем атомарно сохраняет оригинал под project output root. Повтор для целого output использует hash-проверенную запись.
-- Файлы/модули: `src/storage/database.ts`, `src/execution/results.ts`, `src/execution/schemas.ts`, `src/mcp/server.ts`.
-- Проверки: `NOT_RUN` — после изменения ещё не выполнены typecheck/build/tests; сеть, submit, upload, cancel и live API не использовались.
-- Доказательства: пока только исходный контракт реализации; signed URL и provider response не сохраняются в result row/ответе MCP.
-- Ограничения/остаток: preview, manifests/outbox, review и chain gate не реализуются; нужны offline service и MCP-transport tests, затем typecheck/build.
-- Следующий шаг: добавить тесты успешной загрузки, повторной загрузки без submit, invalid MIME/container и вызова `rh_get_results` через MCP transport.
-
-### STEP-0104 — 2026-09-07 — исправлены ошибки строгой типизации result download
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: уточнено narrowing для MP3 frame bytes и сохранён nullable `content-type` в локальную переменную перед MIME validation.
-- Файлы/модули: `src/execution/results.ts`, `PROGRESS.md`.
-- Проверки: предыдущий `npm.cmd run typecheck` — `FAIL` только по 3 strict TypeScript diagnostics в этих строках; после исправления повторная проверка — `NOT_RUN`.
-- Ограничения/остаток: offline tests и build ещё не запускались; внешний API не затрагивался.
-- Следующий шаг: повторить typecheck, затем добавить и запустить L06 offline tests.
-
-### STEP-0105 — 2026-09-07 — уточнена nullable MIME граница
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: `textMime` теперь принимает `null`, который реально возвращает `Headers.get`, без ослабления MIME validation.
-- Файлы/модули: `src/execution/results.ts`, `PROGRESS.md`.
-- Проверки: повторный typecheck после STEP-0104 выявил один оставшийся strict diagnostic на `Headers.get`; после этого точечного исправления typecheck — `NOT_RUN`.
-- Ограничения/остаток: tests/build и MCP transport check ещё не запускались; live API не использовался.
-- Следующий шаг: повторить `npm.cmd run typecheck`, затем перейти к offline tests.
-
-### STEP-0106 — 2026-09-07 — typecheck result download PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: строгая компиляция нового storage/service/MCP tool path прошла без ошибок.
-- Файлы/модули: `src/storage/database.ts`, `src/execution/results.ts`, `src/execution/schemas.ts`, `src/mcp/server.ts`; `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck` — `PASS`. Build, L06 tests и полный offline acceptance — `NOT_RUN`; live API, submit, upload, cancel и пользовательские assets не выполнялись.
-- Ограничения/остаток: нужны tests для container validation, atomic persistence/retry и MCP tool; preview, manifests/outbox, review и chain gate остаются вне выбранного подпункта.
-- Следующий шаг: добавить offline tests и обновить test scripts только для выбранного result-download подпункта.
-
-### STEP-0107 — 2026-09-07 — исправлена проверка PNG IHDR
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: исправлены offsets compression/filter/interlace в PNG IHDR validation; прежняя версия ошибочно читала байты CRC вместо полей контейнера.
-- Файлы/модули: `src/execution/results.ts`, `PROGRESS.md`.
-- Проверки: после исправления typecheck — `NOT_RUN`; тесты ещё не добавлены. Live API и внешние изменения не выполнялись.
-- Ограничения/остаток: требуется покрыть valid/invalid media bytes тестами, чтобы зафиксировать container contract.
-- Следующий шаг: добавить L06 offline tests, включая валидный PNG и отклонение повреждённого/несовместимого output.
-
-### STEP-0108 — 2026-09-07 — добавлены offline проверки result download
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: добавлен `test:l06`; тесты покрывают атомарное сохранение и повтор без submit, отклонение MIME/container mismatch и вызов `rh_get_results` через MCP InMemoryTransport с локальным HTTP fixture. В transport test сервер получает output URL, но submit endpoint не вызывается.
-- Файлы/модули: `tests/results/l06.test.mjs`, `package.json`, `PROGRESS.md`.
-- Проверки: после добавления тестов `npm.cmd run build` и `npm.cmd run test:l06` — `NOT_RUN`; live API и пользовательские данные не используются.
-- Ограничения/остаток: тестовый HTTP fixture синтетический и не доказывает provider compatibility; preview, manifests/outbox, review и chain gate не реализуются.
-- Следующий шаг: выполнить build и `test:l06`, исправить только regressions выбранного подпункта.
-
-### STEP-0109 — 2026-09-07 — build result download PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: production build сформировал актуальный `dist` для нового result-download сервиса, migration и MCP tool.
-- Файлы/модули: rebuilt `dist/` из `src/execution/results.ts`, `src/storage/database.ts`, `src/mcp/server.ts` и связанных исходников; `PROGRESS.md`.
-- Проверки: `npm.cmd run build` — `PASS`. `npm.cmd run test:l06` и полный offline acceptance — `NOT_RUN`; live API не использовался.
-- Ограничения/остаток: synthetic/local HTTP test ещё не выполнен; остальные L06 подпункты не начинаются.
-- Следующий шаг: запустить `npm.cmd run test:l06`.
-
-### STEP-0110 — 2026-09-07 — найден MCP transport regression
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: первые два result-download tests прошли; MCP transport test получил `isError=true`, поэтому добавлена временная диагностическая причина в assertion, без изменения runtime кода и без внешнего запроса.
-- Файлы/модули: `tests/results/l06.test.mjs`, `PROGRESS.md`.
-- Проверки: `npm.cmd run test:l06` — `FAIL`: 2 PASS, 1 FAIL; ошибка обнаружена на `result.isError` в MCP tool case. Build внутри команды — `PASS`; live API и submit/upload/cancel не выполнялись.
-- Ограничения/остаток: причина находится в structured payload следующего запуска; preview, manifests/outbox, review и chain gate не начинаются.
-- Следующий шаг: повторить test:l06 с диагностикой, исправить локальную причину и убрать диагностический текст после PASS.
-
-### STEP-0111 — 2026-09-07 — исправлен synthetic MCP URL
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: локальный HTTP fixture переведён с `127.0.0.1` на разрешённый test host `localhost`, соответствующий существующему guard Workflow API и result redirect validation. Runtime production policy не ослаблялась.
-- Файлы/модули: `tests/results/l06.test.mjs`, `PROGRESS.md`.
-- Проверки: предыдущий `test:l06` выявил `INVALID_CONFIGURATION` до HTTP вызова; после этого test fix повторная проверка — `NOT_RUN`. Live API и provider state не затрагивались.
-- Ограничения/остаток: диагностический assertion text нужно убрать после успешного transport test.
-- Следующий шаг: повторить `npm.cmd run test:l06`.
-
-### STEP-0112 — 2026-09-07 — L06 offline tests PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: после исправления localhost fixture выполнены все три выбранных проверки; временная диагностическая строка удалена, а существующий stdio tool-list test дополнен `rh_get_results`.
-- Файлы/модули: `tests/results/l06.test.mjs`, `tests/mcp/stdio.test.mjs`, `PROGRESS.md`.
-- Проверки: `npm.cmd run test:l06` — `PASS`, 3 tests, 0 failures; build внутри команды — `PASS`. SQLite experimental warning ожидаем. Typecheck и полный offline acceptance — `NOT_RUN` на этом шаге; live API, submit/upload/cancel и пользовательские assets не выполнялись.
-- Доказательства: MCP transport test сохраняет валидный PNG, проверяет output query и media download, `submit=0`, отсутствие API key в ответе; повторная загрузка сервиса не создаёт второй result record.
-- Ограничения/остаток: выбранный result-download подпункт требует общей regression-проверки; preview, manifests/outbox, review и chain gate остаются TODO.
-- Следующий шаг: выполнить typecheck, build и полный `npm.cmd run test:acceptance:offline`, затем сверить итоговый журнал и остановиться.
-
-### STEP-0113 — 2026-09-07 — итоговый typecheck PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: TypeScript strict check после result-download implementation и MCP tool registration прошёл без diagnostics.
-- Файлы/модули: `src/execution/results.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, test updates; `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck` — `PASS`. Production build и полный offline acceptance — `NOT_RUN`; live API и внешние изменения не выполнялись.
-- Ограничения/остаток: нужно завершить build и полный acceptance, затем зафиксировать выбранный подпункт без перехода к остальным L06 задачам.
-- Следующий шаг: выполнить `npm.cmd run build`.
-
-### STEP-0114 — 2026-09-07 — итоговый build PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: production build собрал актуальные JS/declaration/source maps для result records, downloader и `rh_get_results`.
-- Файлы/модули: rebuilt `dist/`; исходники `src/execution/results.ts`, `src/storage/database.ts`, `src/mcp/server.ts`; `PROGRESS.md`.
-- Проверки: `npm.cmd run build` — `PASS`. Полный offline acceptance — `NOT_RUN`; live API, submit/upload/cancel и пользовательские assets не выполнялись.
-- Ограничения/остаток: осталась общая offline regression; preview, manifests/outbox, review и chain gate не затрагиваются.
-- Следующий шаг: выполнить `npm.cmd run test:acceptance:offline`.
-
-### STEP-0115 — 2026-09-07 — обновлён migration unit expectation
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: unit fixture обновлён с migration/table counts `3/13` до `4/14` после добавления только необходимой `results` table. Это устраняет прежний `EBUSY`, который возникал в cleanup после assertion failure до `second.close()`.
-- Файлы/модули: `tests/unit/storage.test.mjs`, `PROGRESS.md`.
-- Проверки: `npm.cmd run test:acceptance:offline` — `FAIL` на старом expectation в unit storage test; `typecheck`, `build`, `test:l06` — `PASS` до этой правки. Live API и внешние изменения не выполнялись.
-- Ограничения/остаток: полный offline acceptance нужно повторить; выбранный result-download подпункт остаётся единственной текущей задачей.
-- Следующий шаг: повторить `npm.cmd run test:acceptance:offline`.
-
-### STEP-0116 — 2026-09-07 — offline acceptance PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: полный offline acceptance после добавления result-download path прошёл; существующие unit, contract, graph, L03, L04, L05 и MCP suites регрессий не обнаружили.
-- Файлы/модули: `src/execution/results.ts`, `src/storage/database.ts`, `src/execution/schemas.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/mcp/stdio.test.mjs`, `tests/unit/storage.test.mjs`, `package.json`; `dist/` rebuilt; `PROGRESS.md`.
-- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 14, L06 3, MCP 1; всего 35 tests, 0 failures. SQLite experimental warnings ожидаемы. Live API, submit/upload/cancel и пользовательские assets не выполнялись.
-- Доказательства: L06 service and MCP tests validate one local PNG result, no duplicate submit, no duplicate result record, MIME/container rejection, atomic file path and no API key in MCP response.
-- Ограничения/остаток: после этого шага добавлена дополнительная symlink-safe path check и синхронизированы README/capabilities; финальные checks после этих точечных изменений ещё `NOT_RUN`. Preview, manifests/outbox, review и chain gate не реализуются.
-- Следующий шаг: повторить typecheck, build и `test:l06` после symlink/docs adjustment, затем завершить выбранный подпункт и остановиться.
-
-### STEP-0117 — 2026-09-07 — symlink-safe result path typecheck PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: strict compilation после realpath-based output-root/result checks и capabilities/README update прошла без diagnostics.
-- Файлы/модули: `src/execution/results.ts`, `src/mcp/server.ts`, `README.md`; `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck` — `PASS`. Build, `test:l06` и final full acceptance — `NOT_RUN` после последнего изменения.
-- Ограничения/остаток: выбранный подпункт почти завершён; нужно подтвердить runtime build и tests на финальном исходном состоянии.
-- Следующий шаг: выполнить `npm.cmd run build`.
-
-### STEP-0118 — 2026-09-07 — финальный build result download PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: production build после symlink-safe path correction и capability documentation завершился без regressions.
-- Файлы/модули: rebuilt `dist/`; `src/execution/results.ts`, `src/mcp/server.ts`, `README.md`; `PROGRESS.md`.
-- Проверки: `npm.cmd run build` — `PASS`. Финальный `test:l06` и полный offline acceptance — `NOT_RUN` после последнего изменения.
-- Ограничения/остаток: live API, submit/upload/cancel и пользовательские assets не выполнялись; preview, manifests/outbox, review и chain gate остаются вне выбранного подпункта.
-- Следующий шаг: выполнить финальный `npm.cmd run test:acceptance:offline`.
-
-### STEP-0119 — 2026-09-07 — result download подпункт завершён
-
-- Пакет и статус: L06 / `LOCAL_DONE` для выбранного подпункта; весь L06 остаётся `IN_PROGRESS`.
-- Изменения и назначение: `rh_get_results` получает подтверждённые provider outputs, скачивает их без повторного submit, валидирует URL/MIME и поддержанные media containers, атомарно сохраняет originals в project output root и повторно использует hash-проверенные local records. Добавлена migration `results`; API key/signed URL не попадают в result row или MCP response.
-- Файлы/модули: `src/execution/results.ts`, `src/storage/database.ts`, `src/execution/schemas.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/mcp/stdio.test.mjs`, `tests/unit/storage.test.mjs`, `package.json`, `README.md`, `PROGRESS.md`; rebuilt `dist/`.
-- Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; `npm.cmd run test:l06` — `PASS` (3 tests); `npm.cmd run test:acceptance:offline` — `PASS` (35 tests, 0 failures). SQLite experimental warnings ожидаемы. Live API/платный submit/upload/cancel, пользовательские assets и внешние изменения — `NOT_RUN` по правилу сессии.
-- Доказательства: MCP transport test подтверждает локальный download через `rh_get_results`, MIME/container rejection, no duplicate submit (`submit=0`) и no API key in response; service retry не создаёт второй result record.
-- Ограничения/остаток: preview/resource links, manifests/outbox, review events, changes-requested revisions, approval и chain gate ещё не реализованы; live result download для RunningHub отдельно не проверен и не подменён synthetic test.
-- Следующий шаг: отдельно выбрать следующий L06 подпункт, начиная с preview/resource link; в этой сессии работа остановлена.
-
-### STEP-0120 — 2026-09-07 — финальная проверка рабочего дерева
-
-- Пакет и статус: L06 / `LOCAL_DONE` для выбранного result-download подпункта; работа остановлена по правилу сессии.
-- Изменения и назначение: финальный список diff сверён; существующие пользовательские изменения `LUNA_START_HERE.md`, компактного `PROGRESS.md`, архива и плана не откатывались и не переписывались за пределами нужных записей.
-- Файлы/модули: итоговый список см. в STEP-0119; добавленные runtime/test файлы сохранены без staging/commit.
-- Проверки: `git diff --check` — `PASS`; Git сообщил только ожидаемые LF→CRLF warnings для изменённых текстовых файлов. `git status --short` подтверждает отсутствие commit/staging action; live API и внешние изменения — `NOT_RUN`.
-- Ограничения/остаток: весь L06 не завершён; preview/resource links, manifests/outbox, review и chain gate остаются TODO. Наличие synthetic MCP test не является live provider evidence.
-- Следующий шаг: отдельно выбрать следующий L06 подпункт, начиная с preview/resource link; автоматически не начинать.
-
-### STEP-0121 — 2026-09-07 — выбран первый подпункт preview/resource link
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: выбран только MCP resource link для уже скачанного локального результата. `rh_get_results` должен возвращать opaque URI без абсолютного пути и не встраивать большие бинарные данные в текстовый ответ; `resources/read` будет отдавать только соответствующий сохранённый файл после повторной проверки границ проекта. Производные preview/poster, manifests/outbox и review не начинаются.
-- Файлы/модули: на момент записи изменён только `PROGRESS.md`; реализация и тесты ещё не изменялись.
-- Проверки: реализация, typecheck, build и tests — `NOT_RUN`; live API, платные генерации, upload и пользовательские assets не выполняются.
-- Ограничения/остаток: нужно добавить безопасный result resource template, lookup записи результата и MCP transport test на `resources/read`.
-- Следующий шаг: реализовать resource link/read path и его offline transport test, затем обновить журнал.
-
-### STEP-0122 — 2026-09-07 — добавлен локальный MCP resource link path
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: добавлен `runninghub://result/<result_id>` resource template. `rh_get_results` теперь возвращает MCP `resource_link` и opaque URI в данных результата; `resources/read` находит запись результата, проверяет canonical project root, symlink escape, размер и SHA-256, затем отдаёт сохранённый оригинал как MCP blob. Новая DB migration не нужна, добавлен lookup по result ID. Обновлены capability/README без заявления о derived preview/poster.
-- Файлы/модули: `src/storage/database.ts`, `src/mcp/server.ts`, `README.md`, `docs/capabilities.md`, `PROGRESS.md`.
-- Проверки: typecheck, build и transport tests после изменения — `NOT_RUN`; live API, платные генерации, upload/cancel и пользовательские assets не выполняются.
-- Доказательства: пока только реализация SDK resource template; нужен offline MCP `resources/read` test с фактически сохранённым PNG.
-- Ограничения/остаток: derived image/video preview, poster, manifests/outbox и review не реализуются в этом шаге; нужно проверить MCP resource protocol и исправить только связанные regressions.
-- Следующий шаг: добавить/запустить offline test `rh_get_results` resource link + `resources/read`, затем выполнить typecheck.
-
-### STEP-0123 — 2026-09-07 — resource link typecheck PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: после добавления `ResourceTemplate`, result lookup и transport assertions строгая компиляция осталась чистой.
-- Файлы/модули: `src/mcp/server.ts`, `src/storage/database.ts`, `tests/results/l06.test.mjs`, `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck` — `PASS`. Build и `npm.cmd run test:l06` — `NOT_RUN`; live API, платные генерации и пользовательские assets не выполнялись.
-- Ограничения/остаток: runtime MCP `resources/read` ещё не подтверждён; derived preview/poster, manifests/outbox и review вне шага.
-- Следующий шаг: запустить `npm.cmd run test:l06`.
-
-### STEP-0124 — 2026-09-07 — L06 resource link test PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: offline MCP transport test теперь вызывает `resources/read` по URI, который вернул `rh_get_results`, и проверяет MIME и точное содержимое ранее сохранённого PNG. Resource link не вызывает submit и не содержит API key.
-- Файлы/модули: `tests/results/l06.test.mjs`, rebuilt `dist/`, `PROGRESS.md`.
-- Проверки: `npm.cmd run test:l06` — `PASS`: build PASS, 3 tests, 0 failures. SQLite experimental warning ожидаем. Live API, платные генерации, upload/cancel и пользовательские assets не выполнялись.
-- Доказательства: test фактически читает MCP blob через `resources/read`, декодирует его и сравнивает с локальным output bytes.
-- Ограничения/остаток: нужна общая offline regression после регистрации MCP resource template; derived preview/poster, manifests/outbox и review не реализуются.
-- Следующий шаг: выполнить `npm.cmd run test:mcp` и полный `npm.cmd run test:acceptance:offline`, затем сверить документацию и журнал.
-
-### STEP-0125 — 2026-09-07 — MCP stdio regression PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`.
-- Изменения и назначение: регистрация dynamic result resource не нарушила обычный stdio initialize/tools/list/call flow.
-- Файлы/модули: rebuilt `dist/`, `PROGRESS.md`.
-- Проверки: `npm.cmd run test:mcp` — `PASS`: build PASS, 1 test, 0 failures. SQLite experimental warning ожидаем. Полный offline acceptance — `NOT_RUN`; live API и внешние изменения не выполнялись.
-- Ограничения/остаток: требуется финальная общая offline regression; derived preview/poster, manifests/outbox и review остаются TODO.
-- Следующий шаг: выполнить `npm.cmd run test:acceptance:offline`.
-
-### STEP-0126 — 2026-09-07 — resource link offline acceptance PASS
-
-- Пакет и статус: L06 / `LOCAL_DONE` для выбранного resource-link подпункта; весь L06 остаётся `IN_PROGRESS`.
-- Изменения и назначение: полный offline acceptance подтвердил, что регистрация `runninghub://result/{result_id}` не ломает существующие graph/project/execution/MCP paths, а L06 transport test возвращает и читает локальный результат через MCP resource protocol.
-- Файлы/модули: `src/mcp/server.ts`, `src/storage/database.ts`, `tests/results/l06.test.mjs`, `README.md`, `docs/capabilities.md`, `PROGRESS.md`; rebuilt `dist/`.
-- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 14, L06 3, MCP 1; всего 35 tests, 0 failures. `npm.cmd run test:mcp` — `PASS` (1 test); `npm.cmd run test:l06` — `PASS` (3 tests); `npm.cmd run typecheck` — `PASS`. SQLite experimental warnings ожидаемы.
-- Доказательства: `tests/results/l06.test.mjs` вызывает `rh_get_results`, получает `resource_link`, вызывает `resources/read`, проверяет `image/png` и exact PNG bytes; submit count остаётся `0`, API key не попадает в ответ.
-- Ограничения/остаток: live result resource compatibility с конкретным MCP-клиентом не проверялась; live API, платные генерации, upload/cancel и пользовательские assets — `NOT_RUN`. Derived preview/poster, manifests/outbox и review loop ещё TODO.
-- Следующий шаг: отдельно выбрать следующий L06 подпункт, начиная с derived preview/poster или manifest по актуальному handoff; автоматически его не начинать.
-
-### STEP-0127 — 2026-09-07 — handoff после resource link
-
-- Пакет и статус: L06 / `LOCAL_DONE` для result download и resource link; работа по выбранному подпункту остановлена.
-- Изменения и назначение: активная сводка и handoff синхронизированы с проверенным состоянием: resource link завершён, следующий конкретный подпункт — derived preview/poster. Manifest/outbox, review и chain gate не начинались.
-- Файлы/модули: `PROGRESS.md`.
-- Проверки: журнал содержит PASS для `npm.cmd run typecheck`, `npm.cmd run test:l06`, `npm.cmd run test:mcp` и `npm.cmd run test:acceptance:offline`; `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings. После этой документационной правки runtime checks — `NOT_RUN` (код не менялся). Live API и внешние изменения — `NOT_RUN` по правилу сессии.
-- Ограничения/остаток: resource link проверен синтетическим offline MCP transport, не конкретным live MCP-клиентом; derived preview/poster и следующие L06 подпункты остаются TODO.
-- Следующий шаг: отдельно начать derived preview/poster; в этой сессии не начинать следующий пункт.
-
-### STEP-0128 — 2026-09-07 — выбран read-only live probe для L06
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live verification of existing result path.
-- Изменения и назначение: с явного разрешения пользователя выбран уже существующий provider task `2097126350429659137` из предыдущего live evidence. Probe использует только status/outputs, затем ephemeral MCP server проверит текущие `rh_get_results` и `resources/read`; новый submit, upload, cancel и пользовательские assets не нужны.
-- Файлы/модули: на момент записи изменён только `PROGRESS.md`; runtime и provider state не изменялись.
-- Проверки: read-only live probe и end-to-end result/resource check — `NOT_RUN`; ключ не выводить в журнал, signed URL и output URL не сохранять.
-- Ограничения/остаток: существующий task может быть уже недоступен или output URL может истечь; это будет зафиксировано как live result, а не заменено offline evidence.
-- Следующий шаг: выполнить `npm.cmd run test:live -- --task-id 2097126350429659137 --timeout-ms 30000` без повторной отправки.
-
-### STEP-0129 — 2026-09-07 — live probe заблокирован отсутствующей конфигурацией
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live verification — `NOT_RUN`.
-- Изменения и назначение: запущен read-only harness для существующего task `2097126350429659137`; harness остановился до создания backend client и до любого HTTP-запроса, потому что не обнаружил обязательную live-конфигурацию.
-- Файлы/модули: `PROGRESS.md`.
-- Проверки: `npm.cmd run test:live -- --task-id 2097126350429659137 --timeout-ms 30000` — `NOT_RUN`, сообщение harness: `configure RUNNINGHUB_WORKFLOW_API_KEY and RUNNINGHUB_LIVE_CASES=full`. SQLite warning появился только при загрузке модулей; provider API не вызывался, submit/upload/cancel не выполнялись.
-- Ограничения/остаток: live probe нельзя честно пометить `PASS` без ключа и явного `RUNNINGHUB_LIVE_CASES=full`; signed URL и output URL не получены и не записывались.
-- Следующий шаг: после настройки этих двух переменных повторить тот же read-only task probe, затем отдельно проверить `rh_get_results` + `resources/read` на ephemeral project.
-
-### STEP-0130 — 2026-09-07 — live env не виден процессу probe
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live verification — `NOT_RUN`.
-- Изменения и назначение: после сообщения пользователя о настроенных переменных их наличие повторно проверено в том же PowerShell-процессе инструмента; значения не выводились и не сохранялись.
-- Файлы/модули: `PROGRESS.md`.
-- Проверки: безопасная проверка окружения показала `RUNNINGHUB_WORKFLOW_API_KEY=MISSING` и `RUNNINGHUB_LIVE_CASES=MISSING`; HTTP/API вызовов и submit не было.
-- Ограничения/остаток: live probe нельзя запустить из текущего процесса, пока переменные не попадут в окружение процесса tool runner. Ключ в чат и журнал не запрашивается.
-- Следующий шаг: повторить команду из STEP-0128 в окружении, видимом tool runner; после `LIVE_PASS` выполнить ephemeral `rh_get_results` + `resources/read` проверку.
-
-### STEP-0131 — 2026-09-07 — live env найден в профиле пользователя
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live verification — `NOT_RUN` на момент записи.
-- Изменения и назначение: проверено наличие обязательных переменных без вывода значений: в текущем process environment обе отсутствуют, в Windows User environment обе заданы. Код проекта и конфигурационные файлы не изменялись.
-- Файлы/модули: `PROGRESS.md`.
-- Проверки: безопасная проверка окружения — `Process: key=MISSING, cases=MISSING; User: key=SET, cases=SET; Machine: key=MISSING, cases=MISSING`; live API, submit, upload, cancel и пользовательские assets пока `NOT_RUN`.
-- Ограничения/остаток: ключ нельзя сохранять в журнале или передавать через файлы; для разрешённого read-only probe нужна одноразовая передача значений из User environment дочернему процессу.
-- Следующий шаг: выполнить только read-only `npm.cmd run test:live -- --task-id 2097126350429659137 --timeout-ms 30000`, не повторяя submit/upload/cancel; затем зафиксировать фактический результат.
-
-### STEP-0132 — 2026-09-07 — read-only recovery probe PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live verification — `PASS` для восстановления существующей задачи.
-- Изменения и назначение: через durable runner выполнен только status/recovery probe для уже существующей provider task `2097126350429659137`; повторная отправка задания не выполнялась.
-- Файлы/модули: `PROGRESS.md`.
-- Проверки: `npm.cmd run test:live -- --task-id 2097126350429659137 --timeout-ms 30000` — `PASS`, `recovered_task_id=2097126350429659137`, `outputs_ready=true`. SQLite experimental warning ожидаем. Submit, upload, cancel и пользовательские assets — `NOT_RUN`.
-- Доказательства: provider task восстановлена как успешная с готовыми outputs; ключ, signed URL и output URL в журнал не записываются.
-- Ограничения/остаток: live `rh_get_results` и MCP `resources/read` для output этой задачи ещё не проверены; preview/poster, manifests/outbox и review loop не начинаются.
-- Следующий шаг: выполнить ephemeral `rh_get_results` + `resources/read` для существующей задачи без submit/upload/cancel и записать фактический результат.
-
-### STEP-0133 — 2026-09-07 — добавлен read-only result/resource live probe
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live result/resource verification — `NOT_RUN` на момент записи.
-- Изменения и назначение: `scripts/test-live.mjs` получил режим `--result-resource`, который поднимает только ephemeral локальное состояние для существующего task ID, вызывает `rh_get_results` через MCP `InMemoryTransport`, затем `resources/read`; режим не содержит submit/upload/cancel.
-- Файлы/модули: `scripts/test-live.mjs`, `PROGRESS.md`.
-- Проверки: после изменения live probe и локальные regression checks — `NOT_RUN`; ключ не выводится и не записывается, пользовательские assets не используются.
-- Ограничения/остаток: требуется запустить новый read-only режим с уже подтверждённым task ID; preview/poster, manifests/outbox и review loop не начинаются.
-- Следующий шаг: выполнить `npm.cmd run test:live -- --result-resource --task-id 2097126350429659137` с одноразовым окружением из Windows User profile.
-
-### STEP-0134 — 2026-09-07 — typecheck live probe PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live result/resource verification — `NOT_RUN`.
-- Изменения и назначение: новый режим live harness и существующий TypeScript-код проходят строгую проверку без diagnostics.
-- Файлы/модули: `scripts/test-live.mjs`, связанные `src/` типы; `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck` — `PASS`; live API result/resource probe ещё `NOT_RUN`, submit/upload/cancel и пользовательские assets не выполнялись.
-- Ограничения/остаток: runtime MCP transport для существующего output ещё не подтверждён после добавления режима.
-- Следующий шаг: выполнить production build, затем запустить read-only `--result-resource` probe.
-
-### STEP-0135 — 2026-09-07 — build live probe PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live result/resource verification — `NOT_RUN`.
-- Изменения и назначение: production `dist/` пересобран перед запуском harness; source/runtime contract для result download и MCP resource link актуален.
-- Файлы/модули: rebuilt `dist/`; `scripts/test-live.mjs`, `PROGRESS.md`.
-- Проверки: `npm.cmd run build` — `PASS`; live result/resource probe ещё `NOT_RUN`, submit/upload/cancel и пользовательские assets не выполнялись.
-- Ограничения/остаток: осталось выполнить только read-only `rh_get_results` + `resources/read` для существующей provider task.
-- Следующий шаг: запустить `npm.cmd run test:live -- --result-resource --task-id 2097126350429659137` с одноразовым окружением из Windows User profile.
-
-### STEP-0136 — 2026-09-07 — исправлена ошибка live harness до provider запроса
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live result/resource verification — `NOT_RUN`.
-- Изменения и назначение: в `scripts/test-live.mjs` добавлен отсутствовавший импорт `planToRow`; предыдущий запуск не дошёл до вызова Workflow API и не выполнял submit/upload/cancel.
-- Файлы/модули: `scripts/test-live.mjs`, `PROGRESS.md`.
-- Проверки: `npm.cmd run test:live -- --result-resource --task-id 2097126350429659137` — `FAIL` до provider output запроса с `planToRow is not defined`; SQLite experimental warning ожидаем. Live API, submit, upload, cancel и пользовательские assets — `NOT_RUN` в этом запуске.
-- Ограничения/остаток: нужен повтор того же read-only режима после harness fix.
-- Следующий шаг: повторить `npm.cmd run test:live -- --result-resource --task-id 2097126350429659137` с одноразовым окружением из Windows User profile.
-
-### STEP-0137 — 2026-09-07 — live result/resource probe вернул MCP error
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live result/resource verification — `NOT_RUN`.
-- Изменения и назначение: повторный read-only harness дошёл до вызова `rh_get_results`, но получил `isError=true`; signed URL и provider payload не выводились.
-- Файлы/модули: `PROGRESS.md`.
-- Проверки: `npm.cmd run test:live -- --result-resource --task-id 2097126350429659137` — `FAIL`: `rh_get_results returned an MCP error`; SQLite experimental warning ожидаем. Submit/upload/cancel и пользовательские assets не выполнялись.
-- Ограничения/остаток: текущая диагностика harness недостаточна, чтобы отличить provider output/download error от ephemeral local setup error; live result/resource нельзя отметить PASS.
-- Следующий шаг: добавить безопасный вывод только structured error code/message с redaction URL, затем повторить тот же read-only probe.
-
-### STEP-0138 — 2026-09-07 — добавлена безопасная диагностика live MCP error
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live result/resource verification — `NOT_RUN`.
-- Изменения и назначение: `--result-resource` теперь показывает только structured error `code/message`, редактируя URL из сообщения; секреты, signed URL и provider payload не сохраняются и не печатаются.
-- Файлы/модули: `scripts/test-live.mjs`, `PROGRESS.md`.
-- Проверки: после диагностической правки повторный live probe — `NOT_RUN`; submit/upload/cancel и пользовательские assets не выполнялись.
-- Ограничения/остаток: требуется повторить read-only probe, чтобы классифицировать причину MCP error и не подменять её offline evidence.
-- Следующий шаг: повторить `npm.cmd run test:live -- --result-resource --task-id 2097126350429659137` с одноразовым окружением из Windows User profile.
-
-### STEP-0139 — 2026-09-07 — live output MIME/container mismatch выявлен
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live result/resource verification — `NOT_RUN`.
-- Изменения и назначение: реальный `rh_get_results` получил provider output `67`, у которого declared/response MIME `video/mp4`, а распознанный контейнер — валидный QuickTime (`video/quicktime`). Текущая строгая проверка отклонила output до сохранения и до `resources/read`.
-- Файлы/модули: `PROGRESS.md`.
-- Проверки: `npm.cmd run test:live -- --result-resource --task-id 2097126350429659137` — `FAIL`, `DOWNLOAD_FAILED: Downloaded output 67 has MIME video/mp4, but its bytes are video/quicktime`; submit/upload/cancel не выполнялись, signed URL не записан.
-- Ограничения/остаток: нужно разрешить только совместимую ISO-BMFF пару `video/mp4`/`video/quicktime`, сохраняя MIME по фактически распознанному контейнеру; другие mismatch должны остаться ошибкой.
-- Следующий шаг: внести узкую MIME compatibility правку, добавить offline QuickTime regression и выполнить typecheck/build/L06 tests перед повторным live probe.
-
-### STEP-0140 — 2026-09-07 — добавлена узкая MP4/QuickTime compatibility
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live result/resource verification — `NOT_RUN` после исправления.
-- Изменения и назначение: MIME validation теперь принимает только двустороннюю совместимость `video/mp4` и `video/quicktime` для ISO-BMFF, продолжая сохранять фактически распознанный `video/quicktime`; добавлен offline test с валидным QuickTime container и provider label `video/mp4`.
-- Файлы/модули: `src/execution/results.ts`, `tests/results/l06.test.mjs`, `PROGRESS.md`.
-- Проверки: после изменения typecheck/build/L06/live — `NOT_RUN`; submit/upload/cancel и пользовательские assets не выполнялись.
-- Ограничения/остаток: нужно подтвердить, что узкая совместимость устраняет реальный output mismatch и не ослабляет прочие MIME/container checks.
-- Следующий шаг: выполнить `npm.cmd run typecheck`, затем `npm.cmd run test:l06` (команда сама пересобирает `dist`).
-
-### STEP-0141 — 2026-09-07 — MIME compatibility typecheck PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live result/resource verification — `NOT_RUN`.
-- Изменения и назначение: строгая TypeScript-проверка после MIME compatibility и QuickTime regression прошла без diagnostics.
-- Файлы/модули: `src/execution/results.ts`, `tests/results/l06.test.mjs`, `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck` — `PASS`; L06 offline tests и повторный live probe ещё `NOT_RUN`.
-- Ограничения/остаток: требуется runtime test с валидным QuickTime и затем повтор реального result/resource probe.
-- Следующий шаг: выполнить `npm.cmd run test:l06`.
-
-### STEP-0142 — 2026-09-07 — L06 QuickTime regression PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; live result/resource verification — `NOT_RUN` после исправления.
-- Изменения и назначение: L06 result-download suite теперь покрывает valid QuickTime bytes с provider label `video/mp4`; исходные invalid MIME/container, atomic retry и MCP resource tests продолжили проходить.
-- Файлы/модули: rebuilt `dist/`; `src/execution/results.ts`, `tests/results/l06.test.mjs`, `PROGRESS.md`.
-- Проверки: `npm.cmd run test:l06` — `PASS`, 4 tests, 0 failures; build внутри команды — `PASS`. SQLite experimental warning ожидаем.
-- Ограничения/остаток: реальный result/resource probe ещё не повторён после compatibility fix; submit/upload/cancel не выполнялись.
-- Следующий шаг: повторить `npm.cmd run test:live -- --result-resource --task-id 2097126350429659137` с одноразовым окружением из Windows User profile.
-
-### STEP-0143 — 2026-09-07 — live result/resource PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; read-only result/resource verification — `PASS`.
-- Изменения и назначение: существующий provider output задачи `2097126350429659137` успешно прошёл `rh_get_results` через MCP transport и последующий `resources/read`; provider label `video/mp4` принят для фактически распознанного QuickTime container, локальный result resource вернул blob без абсолютного пути.
-- Файлы/модули: `scripts/test-live.mjs`, `src/execution/results.ts`, `tests/results/l06.test.mjs`, rebuilt `dist/`, `PROGRESS.md`.
-- Проверки: `npm.cmd run test:live -- --result-resource --task-id 2097126350429659137` — `PASS`, `result_resource=true`, `mime=video/quicktime`, `bytes=3748525`. SQLite experimental warning ожидаем. Submit/upload/cancel и пользовательские assets не выполнялись.
-- Доказательства: live status/recovery и live output/resource path подтверждены раздельно; signed URL и output URL в журнал не записывались.
-- Ограничения/остаток: нужна только общая offline regression после compatibility fix; preview/poster, manifests/outbox и review loop не начинаются.
-- Следующий шаг: выполнить `npm.cmd run test:acceptance:offline`, затем завершить этот L06 live result/resource подпункт без перехода к следующему подпункту.
-
-### STEP-0144 — 2026-09-07 — result/resource live подпункт завершён
-
-- Пакет и статус: L06 / `IN_PROGRESS`; выбранный read-only result/resource подпункт — `LOCAL_DONE` с live evidence.
-- Изменения и назначение: исправлена узкая совместимость provider MIME `video/mp4` с фактическим QuickTime container, добавлен regression test и live harness mode для проверки полного пути `rh_get_results` → `resources/read` без нового запуска.
-- Файлы/модули: `src/execution/results.ts`, `tests/results/l06.test.mjs`, `scripts/test-live.mjs`, rebuilt `dist/`, `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; `npm.cmd run test:l06` — `PASS` (4 tests); `npm.cmd run test:acceptance:offline` — `PASS` (40 tests, 0 failures); `npm.cmd run test:live -- --task-id 2097126350429659137 --timeout-ms 30000` — `PASS`, recovery/output ready; `npm.cmd run test:live -- --result-resource --task-id 2097126350429659137` — `PASS`, `mime=video/quicktime`, `bytes=3748525`. SQLite experimental warnings ожидаемы.
-- Доказательства: live provider status/output query, download и MCP `resources/read` подтверждены; submit/upload/cancel, пользовательские assets и signed/output URLs не выполнялись/не записывались.
-- Ограничения/остаток: весь L06 не завершён; derived preview/poster, manifests/outbox, review events, changes-requested revisions, approval и chain gate остаются TODO. Natural expiry и account-wide compatibility отдельно не проверены.
-- Следующий шаг: отдельно начать derived preview/poster; в этой сессии не переходить к следующему L06 подпункту.
-
-### STEP-0145 — 2026-09-07 — финальная проверка выбранного подпункта
-
-- Пакет и статус: L06 / `IN_PROGRESS`; result download/resource link и их read-only live verification — `LOCAL_DONE`/`PASS`, работа остановлена.
-- Изменения и назначение: итоговое рабочее дерево сверено после MIME compatibility fix, live harness и regression tests; пользовательские изменения в прочих файлах не откатывались, commit/staging не выполнялись.
-- Файлы/модули: итоговый список указан в STEP-0144; `dist/` rebuilt; `PROGRESS.md`.
-- Проверки: `git diff --check` — `PASS`; только ожидаемые LF→CRLF warnings. Live API после PASS не вызывался повторно; submit/upload/cancel и внешние изменения — `NOT_RUN`.
-- Ограничения/остаток: следующий L06 подпункт не начинался; derived preview/poster, manifests/outbox и review loop остаются TODO.
-- Следующий шаг: в новой отдельной задаче начать derived preview/poster; автоматически не начинать его в этой сессии.
-
-### STEP-0146 — 2026-09-07 — выбран derived preview/poster
-
-- Пакет и статус: L06 / `IN_PROGRESS`; выбран только подпункт derived preview/poster.
-- Изменения и назначение: после сохранения локального original `rh_get_results` будет создавать идемпотентные производные PNG: уменьшенный `preview` для image и первый кадр `poster` для video. Производные будут храниться отдельно, проверяться по hash и отдаваться через opaque MCP resource links.
-- Файлы/модули: на момент записи изменён только `PROGRESS.md`; migration, derivative service, MCP integration и tests ещё не изменялись.
-- Проверки: наличие локального `ffmpeg` — `PASS` (`C:\Users\Admin\scoop\shims\ffmpeg.exe`); реализация, typecheck, build и tests — `NOT_RUN`. Live API, платные генерации, upload/cancel и пользовательские assets не выполняются.
-- Ограничения/остаток: media processing использует только фиксированный локальный `ffmpeg` subprocess без shell; audio outputs не получают derived preview/poster. Manifests/outbox, review и chain gate не начинаются.
-- Следующий шаг: добавить durable derived-result records, atomic preview/poster generation и MCP `resources/read` links, затем проверить их через offline transport.
-
-### STEP-0147 — 2026-09-07 — реализован derived preview/poster path
-
-- Пакет и статус: L06 / `IN_PROGRESS`; implementation выбранного preview/poster подпункта добавлена, проверки ещё не завершены.
-- Изменения и назначение: добавлена migration `derived_results`, `DerivedMediaService` с hash-aware reuse, project-root/symlink checks, atomic file writes и фиксированным `ffmpeg` subprocess. Image outputs получают уменьшенный PNG `preview`, video outputs — PNG `poster` первого кадра; `rh_get_results` возвращает derived metadata и `runninghub://derived/<id>` resource links, `resources/read` проверяет их повторно.
-- Файлы/модули: `src/storage/database.ts`, новый `src/execution/derivatives.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `PROGRESS.md`.
-- Проверки: после изменения `npm.cmd run typecheck`, `npm.cmd run build`, `npm.cmd run test:l06`, `npm.cmd run test:acceptance:offline` — `NOT_RUN`; live API, submit/upload/cancel и пользовательские assets не выполнялись.
-- Доказательства: offline tests добавлены для PNG preview reuse, video first-frame poster и MCP `resources/read`; synthetic fixtures не являются live provider evidence.
-- Ограничения/остаток: audio derivative не создаётся; manifests/outbox, review и chain gate не реализуются. Нужно исправить только связанные compile/test regressions и обновить capability docs.
-- Следующий шаг: выполнить `npm.cmd run typecheck`, затем исправить только diagnostics выбранного подпункта.
-
-### STEP-0148 — 2026-09-07 — derived path typecheck PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; preview/poster runtime ещё не подтверждён.
-- Изменения и назначение: strict TypeScript check нового migration/service/resource path прошёл без diagnostics.
-- Файлы/модули: `src/execution/derivatives.ts`, `src/storage/database.ts`, `src/mcp/server.ts`; `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`; `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck` — `PASS`. Build, L06 tests и полный offline acceptance — `NOT_RUN`; live API и внешние изменения не выполнялись.
-- Ограничения/остаток: требуется runtime build и проверка фактической генерации PNG preview/poster, затем синхронизация docs/capabilities.
-- Следующий шаг: выполнить `npm.cmd run test:l06` (он пересобирает `dist`).
-
-### STEP-0149 — 2026-09-07 — derived preview/poster runtime PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; preview/poster local path реализован, общая regression ещё не завершена.
-- Изменения и назначение: build собрал migration/service/server; L06 tests подтвердили PNG preview reuse, video first-frame poster, atomic local files и derived MCP resource read без нового submit.
-- Файлы/модули: rebuilt `dist/`; `src/execution/derivatives.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`; `PROGRESS.md`.
-- Проверки: `npm.cmd run test:l06` — `PASS`: build `PASS`, 6 tests, 0 failures. SQLite experimental warning ожидаем. Полный offline acceptance и `test:mcp` — `NOT_RUN`; live API и внешние изменения не выполнялись.
-- Доказательства: test 4 создаёт и повторно использует image preview; test 5 получает poster первого video frame; MCP test читает derived PNG через `resources/read`; submit count остаётся `0`.
-- Ограничения/остаток: ffmpeg availability у целевого пользователя должна быть настроена; audio outputs получают warning без derivative. Manifests/outbox, review и chain gate не реализуются.
-- Следующий шаг: обновить `README.md`, `docs/capabilities.md`, `docs/configuration.md` под локальный preview/poster contract, затем выполнить `npm.cmd run test:mcp`.
-
-### STEP-0150 — 2026-09-07 — синхронизирована документация preview/poster
-
-- Пакет и статус: L06 / `IN_PROGRESS`; локальный preview/poster path документирован, regression ещё не завершена.
-- Изменения и назначение: README и capability matrix теперь различают originals, image previews, video posters и незавершённые manifests/review; configuration описывает `RUNNINGHUB_FFMPEG_PATH` и отсутствие network/provider claims.
+- Изменения и назначение: записи `STEP-0101`–`STEP-0171` перенесены в `docs/progress-archive-2026-09-07.md`; активный журнал сокращён до текущего состояния, проверок, правил и handoff по образцу `STEP-0101`.
+- Файлы/модули: `PROGRESS.md`, `docs/progress-archive-2026-09-07.md`.
+- Проверки: archive link, наличие `STEP-0171` в архиве, отсутствие рабочих Markdown-ссылок на `LUNA_START_HERE.md` и `git diff --check` — `PASS`; активный журнал сокращён до 44 строк, архив содержит 1130 строк. Typecheck/build — `NOT_RUN`, поскольку изменение документационное.
+- Ограничения/остаток: архив не является вторым активным журналом; review events/manifest review state остаются следующим незавершённым пунктом.
+- Следующий шаг: синхронизировать только review documentation, затем выполнить `npm.cmd run test:mcp` и полный `npm.cmd run test:acceptance:offline`.
+
+### STEP-0174 — 2026-09-07 — синхронизирована review documentation
+
+- Пакет и статус: L06 / `IN_PROGRESS`; local review event contract документирован, финальные regression checks ещё не выполнены.
+- Изменения и назначение: README, capability matrix и configuration теперь отражают `rh_review_result`, initial `PENDING_REVIEW`, idempotent event replay и явное отсутствие chain gate/automatic continuation.
 - Файлы/модули: `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `PROGRESS.md`.
-- Проверки: после документационных изменений `npm.cmd run test:mcp` и полный offline acceptance — `NOT_RUN`; runtime code не менялся, live API и внешние изменения не выполнялись.
-- Ограничения/остаток: требуется убедиться, что MCP stdio и весь offline acceptance не регрессировали после migration/resource registration.
+- Проверки: после documentation changes `npm.cmd run test:mcp`, full offline acceptance и `git diff --check` — `NOT_RUN`; runtime code не менялся, live API и внешние изменения не выполняются.
+- Ограничения/остаток: review state derived from SQLite events, immutable manifest is not rewritten; changes-requested revisions, approval automation и chain gate остаются TODO.
 - Следующий шаг: выполнить `npm.cmd run test:mcp`.
 
-### STEP-0151 — 2026-09-07 — MCP stdio regression PASS
+### STEP-0184 — 2026-09-07 — MCP stdio regression PASS
 
-- Пакет и статус: L06 / `IN_PROGRESS`; общая offline regression ещё не завершена.
-- Изменения и назначение: dynamic `runninghub://derived/{derived_id}` resource registration и migration 5 не нарушили existing stdio initialize/tools/list/call flow.
-- Файлы/модули: rebuilt `dist/`; `src/mcp/server.ts`, `src/storage/database.ts`, `src/execution/derivatives.ts`; `PROGRESS.md`.
-- Проверки: `npm.cmd run test:mcp` — `PASS`: build `PASS`, 1 test, 0 failures. SQLite experimental warning ожидаем. Полный offline acceptance — `NOT_RUN`; live API и внешние изменения не выполнялись.
-- Ограничения/остаток: нужно выполнить полный offline acceptance, затем обновить итоговый handoff и остановиться на этом подпункте.
+- Пакет и статус: L06 / `IN_PROGRESS`; stdio transport остаётся рабочим после расширения review tool schema.
+- Изменения и назначение: initialize/tools-list/local graph and execution-plan flow проходят без регрессии; новый optional revision request не меняет список инструментов и не вызывает provider backend в offline сценарии.
+- Файлы/модули: rebuilt `dist/`; `src/mcp/server.ts`, `src/execution/reviews.ts`, `src/storage/database.ts`, `tests/mcp/stdio.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:mcp` — `PASS`, 1 тест, 0 failures; build `PASS`; SQLite experimental warning ожидаем. Full offline acceptance и финальный `git diff --check` — `NOT_RUN`; live API и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: chain gate и approval automation остаются отдельными TODO; revision request только создаёт local artifacts и не submit-ит их.
 - Следующий шаг: выполнить `npm.cmd run test:acceptance:offline`.
 
-### STEP-0152 — 2026-09-07 — derived preview/poster offline acceptance PASS
+### STEP-0185 — 2026-09-07 — full offline acceptance PASS
 
-- Пакет и статус: L06 / `IN_PROGRESS`; выбранный derived preview/poster подпункт готов локально, работа по нему почти завершена.
-- Изменения и назначение: полная offline regression подтвердила migration 5, derivative storage, MCP resource registration и отсутствие regressions в graph/project/execution/catalog paths.
-- Файлы/модули: `src/execution/derivatives.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`; rebuilt `dist/`; `PROGRESS.md`.
-- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 14, L06 6, MCP 1; всего 38 tests, 0 failures. Внутренние build шаги — `PASS`; SQLite experimental warnings ожидаемы. Live API, submit/upload/cancel и пользовательские assets не выполнялись.
-- Доказательства: L06 image preview и video poster созданы локально через ffmpeg; повтор derivative не создаёт новую запись; MCP transport читает derived PNG; submit count остаётся `0`.
-- Ограничения/остаток: live preview/poster на конкретном RunningHub output не выполнялся; ffmpeg должен быть доступен локально, audio derivative отсутствует. Manifests/outbox, review events, changes-requested revisions, approval и chain gate остаются TODO.
-- Следующий шаг: выполнить финальный `npm.cmd run typecheck` и `git diff --check`, затем завершить только этот L06 подпункт и остановиться.
+- Пакет и статус: L06 / `IN_PROGRESS`; все локальные regression suites проходят, остаются финальные explicit commands и handoff.
+- Изменения и назначение: migration 7, typed revision request, same-chain work item и idempotent review linkage не вызвали regressions в L00–L05, L06 или stdio MCP.
+- Файлы/модули: `src/storage/database.ts`, `src/execution/schemas.ts`, `src/execution/reviews.ts`, `src/mcp/server.ts`, `tests/unit/storage.test.mjs`, `tests/results/l06.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `PROGRESS.md`; `dist/` пересобран.
+- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 14, L06 6, MCP 1; всего 42 теста, 0 failures. Каждый внутренний build — `PASS`; SQLite experimental warnings ожидаемы. Явные typecheck/build/diff check — `NOT_RUN`; live API, платные генерации и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: review chain gate и approval automation не реализованы; новая revision не подготавливается и не отправляется автоматически. Live compatibility этого local-only flow не требуется и не проверялась.
+- Следующий шаг: выполнить явные `npm.cmd run typecheck`, `npm.cmd run build` и `git diff --check`, затем завершить выбранный подпункт и остановиться.
 
-### STEP-0153 — 2026-09-07 — финальная проверка derived preview/poster
+### STEP-0186 — 2026-09-07 — changes-requested revision подпункт завершён
 
-- Пакет и статус: L06 / `LOCAL_DONE` для выбранного derived preview/poster подпункта; весь L06 остаётся `IN_PROGRESS`, работа остановлена.
-- Изменения и назначение: итоговое состояние исходников, тестов, документации и rebuilt `dist/` сверено; пользовательские изменения в `LUNA_START_HERE.md`, компактном журнале/архиве, плане и ранее затронутых файлах не откатывались, commit/staging не выполнялись.
-- Файлы/модули: новый `src/execution/derivatives.ts`; `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`; rebuilt `dist/`; `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run test:l06` — `PASS` (6 tests); `npm.cmd run test:mcp` — `PASS` (1 test); `npm.cmd run test:acceptance:offline` — `PASS` (38 tests, 0 failures); `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings. Live API, платные генерации, upload/cancel и пользовательские assets — `NOT_RUN`.
-- Доказательства: image preview и video first-frame poster созданы локально и повторно переиспользованы по source hash; MCP `resources/read` проверил derived PNG; synthetic/offline evidence не выдаётся за live provider evidence.
-- Ограничения/остаток: live preview/poster compatibility отдельно не проверялась; требуется локальный ffmpeg, audio derivatives не создаются. Manifests/outbox, review events, changes-requested revisions, approval и chain gate остаются TODO.
-- Следующий шаг: в новой отдельной задаче выбрать manifests/outbox как следующий конкретный L06 подпункт; автоматически не начинать.
+- Пакет и статус: L06 / `LOCAL_DONE` для explicit changes-requested revision/work item; chain gate и approval automation не начинались.
+- Изменения и назначение: `rh_review_result` теперь принимает typed `revision_request` только для `CHANGES_REQUESTED`, сохраняет idempotent linkage в migration 7, создаёт дочернюю immutable revision и новый work item в том же `project_id + chain_id`. Повтор возвращает те же объекты; старый job/result/manifest остаются неизменными, provider submit не выполняется.
+- Файлы/модули: `src/storage/database.ts`, `src/execution/schemas.ts`, `src/execution/reviews.ts`, `src/mcp/server.ts`, `tests/unit/storage.test.mjs`, `tests/results/l06.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `PROGRESS.md`; `dist/` пересобран.
+- Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; `npm.cmd run test:unit` — `PASS` (3); `npm.cmd run test:l06` — `PASS` (6); `npm.cmd run test:mcp` — `PASS` (1); `npm.cmd run test:acceptance:offline` — `PASS` (42 всего: unit 3, contract 2, graph 8, L03 4, L04 4, L05 14, L06 6, MCP 1); `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings. SQLite experimental warnings ожидаемы.
+- Ограничения/остаток: live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN` по правилу сессии; live compatibility нового local-only review flow отдельно не проверялась. Chain gate и approval automation остаются TODO.
+- Следующий шаг: в новой отдельной задаче выбрать и реализовать chain gate; текущий выбранный подпункт завершён, дальнейшая работа в этой сессии не выполняется.
 
-### STEP-0154 — 2026-09-07 — выбран подпункт manifests/outbox
+### STEP-0175 — 2026-09-07 — MCP stdio review regression PASS
 
-- Пакет и статус: L06 / `IN_PROGRESS`; выбран только manifests/outbox.
-- Изменения и назначение: после уже реализованных original/preview/poster paths добавить immutable project-local `manifest.json` с hashes, graph/revision snapshot, asset bindings, provider task/output metadata и review status `NOT_READY`; публикацию сделать через идемпотентный SQLite outbox без секретов и абсолютных путей.
-- Файлы/модули: на момент записи изменён только `PROGRESS.md`; runtime и тесты ещё не изменялись.
-- Проверки: реализация, typecheck, build и tests — `NOT_RUN`; live API, платные генерации, upload/cancel и пользовательские assets не выполняются.
-- Ограничения/остаток: review events, changes-requested revisions, approval и chain gate не входят в выбранный подпункт.
-- Следующий шаг: добавить manifest service, outbox persistence и MCP integration, затем проверить повторную публикацию через offline transport.
-
-### STEP-0155 — 2026-09-07 — добавлен manifest/outbox path
-
-- Пакет и статус: L06 / `IN_PROGRESS`; manifests/outbox implementation добавлена, проверки не завершены.
-- Изменения и назначение: migration 6 добавила unique `(kind, aggregate_id)` outbox key; `ResultManifestService` атомарно сохраняет `.runninghub/runs/<job_id>/manifest.json`, фиксирует graph/revision hashes и snapshots, ordered asset hashes, backend/task/output metadata и `review=NOT_READY`, затем проверяет integrity и отмечает идемпотентное `result_manifest` событие опубликованным. `rh_get_results` теперь возвращает manifest publication metadata.
-- Файлы/модули: `src/storage/database.ts`, новый `src/execution/manifests.ts`, `src/mcp/server.ts`, `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck`, build, L06/offline tests — `NOT_RUN` после изменения; live API, submit/upload/cancel и пользовательские assets не выполнялись.
-- Ограничения/остаток: нужно проверить отсутствие provider refs/absolute project paths в manifest, повторный MCP вызов и pending outbox republish; review/approval/chain gate не реализуются.
-- Следующий шаг: выполнить `npm.cmd run typecheck` и исправить только diagnostics manifests/outbox path.
-
-### STEP-0156 — 2026-09-07 — исправлен тип derived rows в manifest builder
-
-- Пакет и статус: L06 / `IN_PROGRESS`; compile fix для manifests/outbox.
-- Изменения и назначение: builder теперь принимает durable `DerivedResultRow` и корректно маппит его `id` в manifest `derived_id`; runtime scope не расширен.
-- Файлы/модули: `src/execution/manifests.ts`, `PROGRESS.md`.
-- Проверки: первый `npm.cmd run typecheck` после implementation — `FAIL` только по несовпадению `DerivedResultRow`/`DerivedResult`; после точечного исправления повторный typecheck — `NOT_RUN`.
-- Ограничения/остаток: build и tests ещё не выполнялись; live API и внешние изменения не затрагивались.
-- Следующий шаг: повторить `npm.cmd run typecheck`.
-
-### STEP-0157 — 2026-09-07 — manifests/outbox typecheck PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; manifest/outbox path компилируется.
-- Изменения и назначение: строгая TypeScript-проверка migration, outbox methods, manifest builder и MCP integration прошла без diagnostics.
-- Файлы/модули: `src/storage/database.ts`, `src/execution/manifests.ts`, `src/mcp/server.ts`, `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck` — `PASS`. Build, L06 и полный offline acceptance — `NOT_RUN`; live API, submit/upload/cancel и пользовательские assets не выполнялись.
-- Ограничения/остаток: нужны runtime tests manifest file, no secret/provider reference, idempotent outbox и повторный MCP call.
-- Следующий шаг: добавить offline assertions в существующий `tests/results/l06.test.mjs` и обновить migration expectation в `tests/unit/storage.test.mjs`.
-
-### STEP-0158 — 2026-09-07 — добавлены manifest/outbox offline assertions
-
-- Пакет и статус: L06 / `IN_PROGRESS`; тестовый контракт manifests/outbox добавлен.
-- Изменения и назначение: storage unit expectation переведён на migration 6; L06 MCP transport test проверяет manifest file under `.runninghub/runs`, graph/output/review metadata, отсутствие project root/API key/provider URL, published outbox event и повторную публикацию после искусственного pending state без submit.
-- Файлы/модули: `tests/unit/storage.test.mjs`, `tests/results/l06.test.mjs`, `src/execution/manifests.ts`, `PROGRESS.md`.
-- Проверки: после добавления assertions typecheck/build/L06 tests — `NOT_RUN`; live API и пользовательские assets не используются.
-- Ограничения/остаток: нужно выполнить L06 runtime test и исправить только связанные failures; review loop не входит в шаг.
-- Следующий шаг: выполнить `npm.cmd run test:l06`.
-
-### STEP-0159 — 2026-09-07 — manifests/outbox L06 tests PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; runtime contract manifests/outbox подтверждён локально.
-- Изменения и назначение: build успешно собрал migration 6 и `ResultManifestService`; MCP test создал manifest, проверил hash-linked output metadata и review `NOT_READY`, затем повторно опубликовал pending outbox row без provider submit.
-- Файлы/модули: rebuilt `dist/`; `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `PROGRESS.md`.
-- Проверки: `npm.cmd run test:l06` — `PASS`, build `PASS`, 6 tests, 0 failures. SQLite experimental warning ожидаем. Полный offline acceptance — `NOT_RUN`; live API и внешние изменения не выполнялись.
-- Ограничения/остаток: нужна общая regression, explicit typecheck и diff check; manifest provider compatibility не является live evidence. Review events/approval/chain gate остаются TODO.
-- Следующий шаг: выполнить `npm.cmd run test:unit` и `npm.cmd run test:mcp` для migration/outbox и stdio regression.
-
-### STEP-0160 — 2026-09-07 — storage migration regression PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; SQLite migration 6 regression подтверждена.
-- Изменения и назначение: unit suite подтвердил повторное применение migration 6 и сохранение table count; outbox unique index не создаёт лишнюю таблицу.
-- Файлы/модули: rebuilt `dist/`; `src/storage/database.ts`, `tests/unit/storage.test.mjs`, `PROGRESS.md`.
-- Проверки: `npm.cmd run test:unit` — `PASS`, build `PASS`, 3 tests, 0 failures. SQLite experimental warning ожидаем. `test:mcp` и full acceptance — `NOT_RUN`; live API не выполнялся.
-- Ограничения/остаток: stdio tool flow и полный offline regression ещё не проверены; review loop остаётся вне scope.
-- Следующий шаг: выполнить `npm.cmd run test:mcp`.
-
-### STEP-0161 — 2026-09-07 — stdio MCP regression PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; manifests/outbox registration не нарушила stdio flow.
-- Изменения и назначение: initialize/tools-list/local tool calls продолжают работать после migration 6 и подключения manifest publication к `rh_get_results`.
-- Файлы/модули: rebuilt `dist/`; `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/mcp/stdio.test.mjs`, `PROGRESS.md`.
-- Проверки: `npm.cmd run test:mcp` — `PASS`, build `PASS`, 1 test, 0 failures. SQLite experimental warning ожидаем. Full offline acceptance — `NOT_RUN`; live API и внешние изменения не выполнялись.
-- Ограничения/остаток: нужен финальный typecheck, full offline acceptance и `git diff --check`; review/approval/chain gate не реализуются.
+- Пакет и статус: L06 / `IN_PROGRESS`; stdio regression после регистрации `rh_review_result` пройдена.
+- Изменения и назначение: initialize/tools-list/local execution flow остаётся рабочим и содержит новый review tool.
+- Файлы/модули: rebuilt `dist/`; `src/mcp/server.ts`, `src/execution/reviews.ts`, `tests/mcp/stdio.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:mcp` — `PASS`: build `PASS`, 1 test, 0 failures. SQLite experimental warning ожидаем. Full offline acceptance и `git diff --check` — `NOT_RUN`; live API и внешние изменения не выполняются.
+- Ограничения/остаток: chain gate, changes-requested revision creation и approval continuation не реализуются в этом пункте.
 - Следующий шаг: выполнить `npm.cmd run test:acceptance:offline`.
 
-### STEP-0162 — 2026-09-07 — manifests/outbox offline acceptance PASS
+### STEP-0176 — 2026-09-07 — review offline acceptance PASS
 
-- Пакет и статус: L06 / `IN_PROGRESS`; выбранный manifests/outbox подпункт локально готов, финальные checks ещё впереди.
-- Изменения и назначение: full offline acceptance подтвердил migration 6, immutable manifest publication, idempotent pending outbox republish и отсутствие regressions в catalog/graph/project/execution/MCP paths.
-- Файлы/модули: `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`; rebuilt `dist/`; `PROGRESS.md`.
-- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 14, L06 6, MCP 1; всего 38 tests, 0 failures. Внутренние build шаги — `PASS`; SQLite experimental warnings ожидаемы. Live API и внешние изменения не выполнялись.
-- Ограничения/остаток: manifest сохраняет review `NOT_READY`; review events/approval/chain gate не реализуются. Нужны финальные typecheck и `git diff --check`.
-- Следующий шаг: выполнить `npm.cmd run typecheck`, затем `git diff --check`.
-
-### STEP-0163 — 2026-09-07 — финальный manifests/outbox typecheck PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; runtime/test path готов локально, documentation sync и diff check ещё впереди.
-- Изменения и назначение: строгая компиляция после всех manifest/outbox implementation и test changes прошла без diagnostics.
-- Файлы/модули: `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, tests; `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck` — `PASS`. После этой проверки documentation sync и `git diff --check` — `NOT_RUN`; live API и внешние изменения не выполнялись.
-- Ограничения/остаток: README/capability matrix ещё содержат прежнее «manifests not implemented» описание; review loop остаётся TODO.
-- Следующий шаг: синхронизировать только manifest/outbox documentation, затем повторить build, relevant tests и `git diff --check`.
-
-### STEP-0164 — 2026-09-07 — синхронизирована документация manifests/outbox
-
-- Пакет и статус: L06 / `IN_PROGRESS`; documentation sync завершена, финальные runtime checks ещё не выполнены.
-- Изменения и назначение: README, capability matrix, configuration и `rh_get_capabilities` теперь отражают local manifest/outbox support; audio derivatives и review/chain gate остаются явно неподдержанными.
-- Файлы/модули: `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `src/mcp/server.ts`, `PROGRESS.md`.
-- Проверки: после документационной/runtime capability правки build, typecheck, tests и `git diff --check` — `NOT_RUN`; live API и внешние изменения не выполнялись.
-- Ограничения/остаток: нужно подтвердить финальное исходное состояние; review events/approval/chain gate не реализуются.
-- Следующий шаг: выполнить `npm.cmd run typecheck`, затем `npm.cmd run build`.
-
-### STEP-0165 — 2026-09-07 — typecheck после документации PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; финальная проверка manifests/outbox продолжается.
-- Изменения и назначение: строгая компиляция после capability update прошла без diagnostics.
-- Файлы/модули: `src/mcp/server.ts`, `src/execution/manifests.ts`, `src/storage/database.ts`, `README.md`, docs; `PROGRESS.md`.
-- Проверки: `npm.cmd run typecheck` — `PASS`. Production build, relevant tests и `git diff --check` — `NOT_RUN`; live API и внешние изменения не выполнялись.
-- Ограничения/остаток: требуется пересобрать `dist/` после последнего source update и повторить tests.
-- Следующий шаг: выполнить `npm.cmd run build`.
-
-### STEP-0166 — 2026-09-07 — финальный build manifests/outbox PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; `dist/` синхронизирован с manifests/outbox implementation.
-- Изменения и назначение: production TypeScript build успешно собрал migration 6, `ResultManifestService` и updated capability response.
-- Файлы/модули: rebuilt `dist/`; `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, docs; `PROGRESS.md`.
-- Проверки: `npm.cmd run build` — `PASS`. После последнего source/docs update L06, full acceptance и `git diff --check` — `NOT_RUN`; live API не выполнялся.
-- Ограничения/остаток: нужны финальные L06/MCP/full offline regression и diff check; review loop остаётся TODO.
-- Следующий шаг: выполнить `npm.cmd run test:l06`.
-
-### STEP-0167 — 2026-09-07 — финальный L06 manifests/outbox test PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; selected manifests/outbox runtime test остаётся зелёным после docs/capability update.
-- Изменения и назначение: L06 suite повторно подтвердил originals, derived resources, manifest persistence and pending outbox republish without a second submit.
-- Файлы/модули: rebuilt `dist/`; `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, docs; `PROGRESS.md`.
-- Проверки: `npm.cmd run test:l06` — `PASS`, build `PASS`, 6 tests, 0 failures. SQLite experimental warning ожидаем. Full acceptance и `git diff --check` — `NOT_RUN`; live API не выполнялся.
-- Ограничения/остаток: нужна финальная stdio/full offline regression и whitespace/diff check; review events/approval/chain gate не реализуются.
-- Следующий шаг: выполнить `npm.cmd run test:mcp`, затем `npm.cmd run test:acceptance:offline`.
-
-### STEP-0168 — 2026-09-07 — финальный MCP stdio test PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; stdio regression после capability update пройдена.
-- Изменения и назначение: MCP initialize/tools-list/local execution flow остаётся рабочим с новым manifest/outbox capability response.
-- Файлы/модули: rebuilt `dist/`; `src/mcp/server.ts`, `src/execution/manifests.ts`, tests; `PROGRESS.md`.
-- Проверки: `npm.cmd run test:mcp` — `PASS`, build `PASS`, 1 test, 0 failures. SQLite experimental warning ожидаем. Full offline acceptance и `git diff --check` — `NOT_RUN`; live API не выполнялся.
-- Ограничения/остаток: требуется финальная полная regression; review loop не реализуется в этом пункте.
-- Следующий шаг: выполнить `npm.cmd run test:acceptance:offline`.
-
-### STEP-0169 — 2026-09-07 — финальный manifests/outbox acceptance PASS
-
-- Пакет и статус: L06 / `IN_PROGRESS`; выбранный manifests/outbox подпункт готов локально, остаётся только diff check и handoff.
-- Изменения и назначение: полная offline regression после documentation/capability sync прошла без regressions; MCP path по-прежнему пишет и переиздаёт manifest через outbox без нового submit.
-- Файлы/модули: `src/execution/manifests.ts`, `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`; rebuilt `dist/`; `PROGRESS.md`.
-- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 14, L06 6, MCP 1; всего 38 tests, 0 failures. Все внутренние build шаги — `PASS`; SQLite experimental warnings ожидаемы. Live API, submit/upload/cancel и пользовательские assets не выполнялись.
-- Ограничения/остаток: review events/approval/chain gate и audio derivatives остаются TODO; live manifest compatibility отдельно не проверялась и не подменена offline evidence. Нужен `git diff --check`.
+- Пакет и статус: L06 / `IN_PROGRESS`; выбранный review events/manifest review state подпункт готов локально, остаётся финальный diff check и handoff.
+- Изменения и назначение: full offline regression подтвердила storage review event path, `rh_review_result`, idempotent replay/conflict handling, manifest `PENDING_REVIEW` и обновлённый summary без regressions в предыдущих пакетах.
+- Файлы/модули: `src/execution/reviews.ts`, `src/storage/database.ts`, `src/execution/manifests.ts`, `src/execution/schemas.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/mcp/stdio.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `PROGRESS.md`; rebuilt `dist/`.
+- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 14, L06 6, MCP 1; всего 38 tests, 0 failures. Внутренние build шаги — `PASS`; SQLite experimental warnings ожидаемы. `git diff --check` — `NOT_RUN`; live API и внешние изменения не выполняются.
+- Ограничения/остаток: changes-requested revisions, approval automation и chain gate остаются TODO; synthetic/offline evidence не является live review compatibility.
 - Следующий шаг: выполнить `git diff --check`, затем завершить выбранный подпункт и остановиться.
 
-### STEP-0170 — 2026-09-07 — manifests/outbox подпункт завершён
+### STEP-0177 — 2026-09-07 — review events подпункт завершён
 
-- Пакет и статус: L06 / `LOCAL_DONE` для manifests/outbox; весь L06 остаётся `IN_PROGRESS`, работа остановлена по правилу сессии.
-- Изменения и назначение: `rh_get_results` теперь атомарно создаёт immutable `.runninghub/runs/<job_id>/manifest.json` с graph/revision/asset/backend/task/output hashes и `review=NOT_READY`; SQLite outbox обеспечивает уникальное `result_manifest` событие и повторную публикацию pending записи с integrity check. Секреты, signed/provider URLs и абсолютный project root в manifest не сохраняются.
-- Файлы/модули: новый `src/execution/manifests.ts`; `src/storage/database.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `PROGRESS.md`; rebuilt `dist/`.
-- Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; `npm.cmd run test:l06` — `PASS` (6 tests); `npm.cmd run test:mcp` — `PASS` (1 test); `npm.cmd run test:acceptance:offline` — `PASS` (38 tests, 0 failures); `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings. SQLite experimental warnings ожидаемы. Live API, платные генерации, upload/cancel и пользовательские assets — `NOT_RUN`.
-- Доказательства: offline MCP transport реально создаёт manifest, проверяет output hash/review status/no secret or absolute root, затем после сброса `published_at` повторно публикует тот же outbox event без второго submit; synthetic/offline evidence не выдаётся за live compatibility.
-- Ограничения/остаток: review events, changes-requested revisions, approval и chain gate не реализованы; audio derivatives отсутствуют; live manifest compatibility отдельно не проверялась.
-- Следующий шаг: в новой отдельной задаче выбрать review events/manifest review state; автоматически не начинать.
+- Пакет и статус: L06 / `LOCAL_DONE` для review events/manifest review state; весь L06 остаётся `IN_PROGRESS`, работа остановлена по правилу сессии.
+- Изменения и назначение: transaction-safe review event persistence, deterministic fallback event ID, decisions `APPROVED`/`CHANGES_REQUESTED`/`REJECTED`, MCP tool `rh_review_result` и review summary в `rh_get_results` завершены. Новый manifest snapshot имеет `PENDING_REVIEW`; immutable `manifest.json` не переписывается, повтор event ID не создаёт второе событие.
+- Файлы/модули: новый `src/execution/reviews.ts`; `src/storage/database.ts`, `src/execution/manifests.ts`, `src/execution/schemas.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `tests/mcp/stdio.test.mjs`, `PROGRESS.md`; rebuilt `dist/`.
+- Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS` через L06/MCP/acceptance scripts; `npm.cmd run test:l06` — `PASS` (6 tests); `npm.cmd run test:mcp` — `PASS` (1 test); `npm.cmd run test:acceptance:offline` — `PASS` (38 tests, 0 failures); `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings. SQLite experimental warnings ожидаемы. Live API, платные генерации, upload/cancel и пользовательские assets — `NOT_RUN`.
+- Ограничения/остаток: changes-requested revisions, approval automation и chain gate не реализованы; live review compatibility отдельно не проверялась и offline evidence не выдаётся за live.
+- Следующий шаг: в новой отдельной задаче выбрать changes-requested revision или chain gate; автоматически не начинать.
+
+### STEP-0178 — 2026-09-07 — выбран changes-requested revision подпункт
+
+- Пакет и статус: L06 / `IN_PROGRESS`; выбран только подпункт явного исправления после `CHANGES_REQUESTED`, chain gate и approval automation не входят в текущий шаг.
+- Решение и граница: review без revision request сохраняет прежнее поведение; только явно переданный пакет graph operations создаёт дочернюю immutable revision и новый work item в том же `project_id + chain_id`. Старый job/result/manifest не изменяются, provider submit не вызывается.
+- Файлы/модули: на этапе выбора изменён только `PROGRESS.md`; код и тесты ещё не изменялись.
+- Проверки: typecheck, build, offline tests и `git diff --check` — `NOT_RUN`, поскольку реализация ещё не начата; live API, платные генерации и внешние изменения — `NOT_RUN` по правилу сессии.
+- Ограничения/остаток: требуется определить и покрыть локальный MCP-контракт revision request и его idempotent replay; chain gate остаётся отдельным незавершённым подпунктом.
+- Следующий шаг: реализовать storage linkage и explicit revision request в `rh_review_result`, затем добавить offline transport regression.
+
+### STEP-0179 — 2026-09-07 — explicit revision request implementation
+
+- Пакет и статус: L06 / `IN_PROGRESS`; storage linkage и explicit changes-requested revision flow реализованы, regression ещё не выполнена.
+- Изменения и назначение: добавлена migration 7 с idempotent связью `review_event_id -> source_revision_id/revision_id/work_item_id`; `rh_review_result` принимает только при `CHANGES_REQUESTED` явный `revision_request` с typed graph operations. Сервис создаёт дочернюю CAS revision и новый work item в той же цепочке, повтор возвращает сохранённую связь; старый job/result/manifest не переписываются и submit не вызывается.
+- Файлы/модули: `src/storage/database.ts`, `src/execution/schemas.ts`, `src/execution/reviews.ts`, `src/mcp/server.ts`, `PROGRESS.md`.
+- Проверки: typecheck, build, L06 tests, MCP transport tests, full offline acceptance и `git diff --check` — `NOT_RUN`, код изменён непосредственно перед записью; live API, платные генерации и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: revision request не запускает подготовку/submit автоматически; chain gate и approval automation остаются отдельными TODO. Нужен MCP regression на создание и idempotent replay новой revision/work item.
+- Следующий шаг: добавить offline transport assertions для explicit changes-requested revision и запрета revision request для других решений.
+
+### STEP-0180 — 2026-09-07 — revision request typecheck PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; implementation компилируется, regression ещё не выполнена.
+- Изменения и назначение: на MCP boundary добавлено явное приведение typed graph operations после Zod `unknown`, без изменения runtime-контракта; это устранило typecheck failure для `revision_request`.
+- Файлы/модули: `src/mcp/server.ts`, `PROGRESS.md`.
+- Проверки: первый `npm.cmd run typecheck` — `FAIL` на несовместимости `z.unknown()` с `InputValue`; после минимального исправления повторный `npm.cmd run typecheck` — `PASS`. Build, L06/MCP/full offline tests и `git diff --check` — `NOT_RUN`; live API и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: runtime idempotency и MCP response shape ещё нужно проверить; chain gate/approval automation не затрагивались.
+- Следующий шаг: запустить `npm.cmd run test:l06`.
+
+### STEP-0181 — 2026-09-07 — L06 regression expectation corrected
+
+- Пакет и статус: L06 / `IN_PROGRESS`; точечный прогон выявил и локализовал только конфликт ожиданий в новом regression.
+- Изменения и назначение: сохранены два независимых сценария: `APPROVED + revision_request` должен вернуть `INVALID_CONFIGURATION`, а конфликт существующего review event проверяется без `revision_request` и по-прежнему ожидает `REQUEST_CONFLICT`.
+- Файлы/модули: `tests/results/l06.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:l06` — `FAIL` на 1 из 6: 5 passed, 1 failed из-за тестового ожидания `REQUEST_CONFLICT` вместо фактического корректного `INVALID_CONFIGURATION`; исправление внесено, повторный прогон — `NOT_RUN`.
+- Ограничения/остаток: нужно подтвердить создание дочерней revision/work item, idempotent replay и отсутствие submit после исправления теста; live проверки не выполняются.
+- Следующий шаг: повторить `npm.cmd run test:l06`.
+
+### STEP-0182 — 2026-09-07 — L06 revision request regression PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; explicit changes-requested revision/work item flow проходит точечную offline проверку.
+- Изменения и назначение: MCP transport regression подтверждает child revision с правильным parent, same-chain work item, сохранение старого job и повторный вызов без второй revision/event; `APPROVED + revision_request` отклоняется до записи review.
+- Файлы/модули: `tests/results/l06.test.mjs`, `tests/unit/storage.test.mjs`, `PROGRESS.md`; `dist/` пересобран командой теста.
+- Проверки: `npm.cmd run test:l06` — `PASS`, build `PASS`, 6 тестов, 0 failures; SQLite experimental warning ожидаем. `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings. Full offline и MCP stdio regression — `NOT_RUN`; live API/платные генерации/внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: revision request не готовит и не отправляет следующий plan; chain gate и approval automation остаются TODO.
+- Следующий шаг: выполнить `npm.cmd run test:unit` для migration 7, затем `npm.cmd run test:mcp`.
+
+### STEP-0183 — 2026-09-07 — migration 7 unit regression PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; storage migration contract обновлён и подтверждён, остаётся MCP stdio и полный offline acceptance.
+- Изменения и назначение: unit snapshot ожидает migration version 7 и 16 operational tables после добавления `review_revisions`; reopen остаётся idempotent.
+- Файлы/модули: `tests/unit/storage.test.mjs`, `PROGRESS.md`; `dist/` пересобран командой теста.
+- Проверки: `npm.cmd run test:unit` — `PASS`, 3 теста, 0 failures; SQLite experimental warning ожидаем. MCP stdio, full offline и финальный diff check — `NOT_RUN`; live API и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: функциональная граница остаётся local-only; chain gate и approval automation не реализуются.
+- Следующий шаг: выполнить `npm.cmd run test:mcp`.
+
+### STEP-0187 — 2026-09-07 — выбран chain gate
+
+- Пакет и статус: L06 / `IN_PROGRESS`; выбран только общий review/chain gate для всех submit paths, approval automation не входит в этот шаг.
+- Основание: активный handoff и записи `STEP-0184`–`STEP-0186` имеют более новые номера, чем физически последняя устаревшая запись `STEP-0183`; продолжение определяется по максимальному номеру и разделам плана L06.
+- Граница реализации: транзакционно резервировать job только если в той же `project_id + chain_id` нет другого выполняющегося/неопределённого job, незавершённого download либо результата без review; существующий job текущего plan возвращать до проверки gate. Approval не запускает новую работу автоматически.
+- Файлы/модули: планируются `src/storage/database.ts`, `src/execution/runner.ts`, `src/execution/results.ts`, `src/errors.ts`, offline regression tests и этот журнал.
+- Проверки: typecheck, build, L05/L06/MCP/full offline acceptance и `git diff --check` — `NOT_RUN`, реализация ещё не начата; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN` по правилу сессии.
+- Ограничения/остаток: после реализации нужно отдельно подтвердить блокировку активной цепочки, pending review, idempotent повтор и явное продолжение после review; approval automation, LoRA/media rules и live compatibility не начинать.
+- Следующий шаг: добавить storage-level chain gate и связать его с durable runner/download state.
+
+### STEP-0188 — 2026-09-07 — добавлен storage chain gate
+
+- Пакет и статус: L06 / `IN_PROGRESS`; runtime gate реализован, regression tests ещё не добавлены.
+- Изменения и назначение: `Storage.reserveJob` теперь под `BEGIN IMMEDIATE` проверяет jobs всей `project_id + chain_id` до создания нового job. Блокируются активное/неопределённое выполнение, незавершённый download, отсутствие сохранённых outputs и outputs без review; повтор уже существующего plan/job возвращается до gate. Добавлен структурированный код `REVIEW_PENDING`.
+- Состояние download: `ResultDownloadService` переводит artifact в `PENDING`, затем в `READY` после всех валидированных файлов либо в `FAILED` при любой ошибке, чтобы авария/незавершённая загрузка не освобождала chain.
+- Файлы/модули: `src/storage/database.ts`, `src/execution/results.ts`, `src/errors.ts`, `PROGRESS.md`.
+- Проверки: typecheck, build и tests — `NOT_RUN`, изменения внесены непосредственно перед записью; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: нужна проверка gate для active execution, pending review, idempotent retry и explicit run после review; approval automation не добавлена.
+- Следующий шаг: добавить offline regression через durable runner и MCP transport.
+
+### STEP-0189 — 2026-09-07 — chain gate typecheck PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; runtime gate type-checks, regression tests ещё не добавлены.
+- Изменения и назначение: проверена компиляция storage-level gate и download-state transitions без изменения scope задачи.
+- Файлы/модули: `src/storage/database.ts`, `src/execution/results.ts`, `src/errors.ts`, `PROGRESS.md`.
+- Проверки: `npm.cmd run typecheck` — `PASS`; build, tests и `git diff --check` — `NOT_RUN`; live API и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: требуется проверить поведение на active execution, pending review, idempotent retry и explicit continuation после review.
+- Следующий шаг: добавить direct runner regression для транзакционного chain gate.
+
+### STEP-0190 — 2026-09-07 — добавлены chain gate regressions
+
+- Пакет и статус: L06 / `IN_PROGRESS`; tests добавлены, прогон ещё не выполнен.
+- Изменения и назначение: direct durable-runner сценарий проверяет active-chain block, idempotent повтор текущего plan, pending review block и освобождение после явного `APPROVED`. MCP transport сценарий проверяет, что `rh_run_workflow` не submit-ит до review, а после review требует отдельного явного вызова; approval сам не запускает работу.
+- Файлы/модули: `tests/execution/l05.test.mjs`, `tests/results/l06.test.mjs`, `PROGRESS.md`.
+- Проверки: typecheck — `PASS` (STEP-0189); L05, L06, build, MCP, full offline acceptance и `git diff --check` — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: нужно проверить download state transitions и отсутствие regressions в предыдущих пакетах.
+- Следующий шаг: запустить `npm.cmd run test:l05`.
+
+### STEP-0191 — 2026-09-07 — исправлен конфликт старого L05 fixture
+
+- Пакет и статус: L06 / `IN_PROGRESS`; первый L05 прогон выявил только устаревшее ожидание независимого work item в default chain.
+- Изменения и назначение: upload-cache regression теперь явно использует отдельный `chain_id`, потому что это независимая проверка повторной загрузки, а не продолжение review-цепочки. Код gate не ослаблялся.
+- Файлы/модули: `tests/execution/l05.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:l05` — `FAIL`: 14 passed, 1 failed; failure был `REVIEW_PENDING` в старом upload-cache сценарии и устранён сменой fixture. Повторный L05, L06, build, MCP, full offline acceptance и `git diff --check` — `NOT_RUN`; live API и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: нужно подтвердить повторный L05 и MCP review gate.
+- Следующий шаг: повторить `npm.cmd run test:l05`.
+
+### STEP-0192 — 2026-09-07 — durable runner chain gate PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; direct runner gate regression пройдена, остаётся MCP transport и общий regression.
+- Изменения и назначение: `npm.cmd run test:l05` — `PASS`, 15 тестов, 0 failures. Подтверждены active execution block, idempotent повтор текущего plan, pending review block, explicit release после `APPROVED`, upload cache и прежняя recovery-конкурентность. SQLite experimental warning ожидаем.
+- Файлы/модули: rebuilt `dist/`, `tests/execution/l05.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:l05` — `PASS`; typecheck — `PASS` (STEP-0189); L06, MCP, full offline acceptance и `git diff --check` — `NOT_RUN`; live API, платные генерации и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: MCP boundary должен подтвердить отсутствие submit до review и explicit continuation после review.
+- Следующий шаг: запустить `npm.cmd run test:l06`.
+
+### STEP-0193 — 2026-09-07 — MCP review gate regression PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; chain gate проходит direct runner и MCP transport, остаётся stdio/full regression.
+- Изменения и назначение: `rh_get_results` сохраняет результат в `PENDING_REVIEW`; `rh_run_workflow` в той же chain возвращает `REVIEW_PENDING` без provider submit. После явного `rh_review_result(APPROVED)` submit всё ещё не происходит сам, а отдельный `rh_run_workflow` создаёт следующий job.
+- Файлы/модули: rebuilt `dist/`, `tests/results/l06.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:l06` — `PASS`, 7 тестов, 0 failures; `npm.cmd run test:l05` — `PASS`, 15 тестов. SQLite experimental warning ожидаем. MCP stdio, full offline acceptance, explicit typecheck/build и `git diff --check` — `NOT_RUN`; live API и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: нужно проверить MCP stdio schema/handshake и общий offline regression; approval automation не реализуется.
+- Следующий шаг: запустить `npm.cmd run test:mcp`.
+
+### STEP-0194 — 2026-09-07 — MCP stdio regression PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; stdio transport не регрессировал после добавления `REVIEW_PENDING` и chain reservation.
+- Изменения и назначение: initialize/tools-list, local graph and execution-plan flow прошли без изменений списка MCP tools и без provider backend в offline-сценарии.
+- Файлы/модули: rebuilt `dist/`, `src/errors.ts`, `src/storage/database.ts`, `src/execution/results.ts`, `tests/mcp/stdio.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:mcp` — `PASS`, 1 тест, 0 failures; build — `PASS`; SQLite experimental warning ожидаем. Full offline acceptance, explicit typecheck/build и `git diff --check` — `NOT_RUN`; live API и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: остаётся общий offline regression и финальные explicit checks; approval automation не начинать.
+- Следующий шаг: запустить `npm.cmd run test:acceptance:offline`.
+
+### STEP-0195 — 2026-09-07 — full offline acceptance PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; все локальные suites проходят, остаются explicit typecheck/build/diff checks и handoff.
+- Изменения и назначение: chain gate и download-state changes не вызвали regressions в L00–L05, L06 или stdio MCP; offline MCP сценарий подтверждает блокировку pending review и explicit continuation без approval automation.
+- Файлы/модули: `src/errors.ts`, `src/storage/database.ts`, `src/execution/results.ts`, `tests/execution/l05.test.mjs`, `tests/results/l06.test.mjs`, `PROGRESS.md`; active summary/handoff синхронизированы; `dist/` пересобран.
+- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 15, L06 7, MCP 1; всего 40 тестов, 0 failures. Внутренние build — `PASS`; SQLite experimental warnings ожидаемы. Explicit typecheck/build и `git diff --check` — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: chain gate пока имеет только offline evidence; live compatibility и approval automation не проверяются/не реализуются в этом пункте.
+- Следующий шаг: выполнить явные `npm.cmd run typecheck`, `npm.cmd run build` и `git diff --check`.
+
+### STEP-0196 — 2026-09-07 — chain gate explicit checks PASS
+
+- Пакет и статус: L06 / `LOCAL_DONE` для chain gate; approval automation и следующий L07/L08 пункт не начинались.
+- Изменения и назначение: транзакционный gate в `reserveJob` охраняет весь execution path, download state не освобождает chain до полного сохранения outputs, а MCP-контракт возвращает `REVIEW_PENDING` без внешнего submit. Existing plan/job retry и explicit continuation после review сохранены.
+- Файлы/модули: `src/errors.ts`, `src/storage/database.ts`, `src/execution/results.ts`, `tests/execution/l05.test.mjs`, `tests/results/l06.test.mjs`, `PROGRESS.md`; `dist/` пересобран.
+- Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; `npm.cmd run test:l05` — `PASS` (15); `npm.cmd run test:l06` — `PASS` (7); `npm.cmd run test:mcp` — `PASS` (1); `npm.cmd run test:acceptance:offline` — `PASS` (40 всего); `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings. SQLite experimental warnings ожидаемы.
+- Ограничения/остаток: live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN` по правилу сессии; live chain compatibility и approval automation остаются TODO. Следующий пакет L07 не начинать.
+- Следующий шаг: в новой отдельной задаче продолжить оставшийся L06 подпункт approval automation или явно выбрать следующий пункт по обновлённому handoff; автоматически не начинать.
+
+### STEP-0197 — 2026-09-07 — выбран контракт approval continuation
+
+- Пакет и статус: L06 / `IN_PROGRESS`; выбран только оставшийся подпункт approval automation, L07/L08 и live acceptance не начинаются.
+- Решение и граница: реализовать явно заданное `continuation { plan_id, request_id }` для `APPROVED`; голый approval не запускает следующую генерацию, а повтор review/continuation должен оставаться идемпотентным.
+- Файлы/модули: пока изменён только `PROGRESS.md`; продуктовый код и тесты ещё не изменены.
+- Проверки: typecheck, build, L06/L05/MCP/full offline и `git diff --check` — `NOT_RUN` до реализации; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: нужен durable запуск уже подготовленного следующего plan только после успешной записи approval; ошибка continuation не должна создавать второй review event или второй submit.
+- Следующий шаг: добавить строгую схему и серверный запуск same-chain continuation, затем покрыть MCP idempotency/regression тестом.
+
+### STEP-0198 — 2026-09-07 — реализован explicit approval continuation
+
+- Пакет и статус: L06 / `IN_PROGRESS`; approval automation реализуется как opt-in continuation, автоматическое approval и L07/L08 не начинаются.
+- Изменения и назначение: добавлена строгая `continuation`-схема для `rh_review_result`; same-project/same-chain следующий work item валидируется до review, intent сохраняется в outbox, а уже подготовленный plan запускается через `DurableWorkflowRunner`. Повтор того же review event и continuation возвращает тот же job без второго provider submit; обычный `APPROVED` ничего не запускает.
+- Файлы/модули: `src/execution/schemas.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `PROGRESS.md`.
+- Проверки: после реализации typecheck, build, L06/L05/MCP/full offline и `git diff --check` — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: нужно подтвердить компиляцию и MCP idempotency; provider/live compatibility и автоматическое approval остаются вне этого пункта.
+- Следующий шаг: запустить `npm.cmd run typecheck`, затем build и релевантный `npm.cmd run test:l06`.
+
+### STEP-0199 — 2026-09-07 — typecheck approval continuation PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; source-level continuation implementation compiles.
+- Изменения и назначение: проверен новый schema/server path без emitted artifacts; approval continuation остаётся opt-in и same-chain.
+- Файлы/модули: проверены `src/execution/schemas.ts`, `src/mcp/server.ts` и связанные типы.
+- Проверки: `npm.cmd run typecheck` — `PASS`; build, L06/L05/MCP/full offline и `git diff --check` — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: тесты запускаются только после пересборки `dist/`; нужно проверить outbox intent, bare approval и повтор continuation через MCP transport.
+- Следующий шаг: запустить `npm.cmd run build`.
+
+### STEP-0200 — 2026-09-07 — build approval continuation PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; emitted `dist/` соответствует новому server/schema path.
+- Изменения и назначение: TypeScript build прошёл, можно выполнять transport regression с обновлёнными артефактами.
+- Файлы/модули: rebuilt `dist/`; source changes remain in `src/execution/schemas.ts`, `src/mcp/server.ts`.
+- Проверки: `npm.cmd run build` — `PASS`; L06/L05/MCP/full offline и `git diff --check` — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: нужно проверить локальный MCP flow и отсутствие второго submit при повторе.
+- Следующий шаг: запустить `npm.cmd run test:l06`.
+
+### STEP-0201 — 2026-09-07 — исправлен L06 continuation fixture
+
+- Пакет и статус: L06 / `IN_PROGRESS`; первая проверка нового MCP regression выявила ошибку сценария теста.
+- Изменения и назначение: тест пытался создать второй continuation в той же chain при активном первом target job; это корректно давало `REVIEW_PENDING`. Fixture перестроен на один target plan: explicit continuation запускает его, повтор review и обычный `rh_run_workflow` возвращают тот же job.
+- Файлы/модули: `tests/results/l06.test.mjs`, `PROGRESS.md`.
+- Проверки: первый `npm.cmd run test:l06` — `FAIL`: 6 passed, 1 failed на старом тестовом сценарии, runtime block сработал ожидаемо; после fixture fix повторный L06 и остальные проверки — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: нужно повторно подтвердить opt-in continuation и отсутствие второго submit.
+- Следующий шаг: повторить `npm.cmd run test:l06`.
+
+### STEP-0202 — 2026-09-07 — L06 approval continuation regression PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; explicit approval continuation проходить через MCP transport.
+- Изменения и назначение: подтверждены bare approval без submit, explicit same-chain continuation через `rh_review_result`, idempotent повтор review/continuation и последующий `rh_run_workflow` без второго submit.
+- Файлы/модули: rebuilt `dist/`, `tests/results/l06.test.mjs`, `src/execution/schemas.ts`, `src/mcp/server.ts`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:l06` — `PASS`, 7 тестов, 0 failures; build внутри команды — `PASS`; SQLite experimental warning ожидаем. L05, MCP, full offline, explicit typecheck/build и `git diff --check` — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: нужен regression по durable runner/L05 и stdio, затем полный offline acceptance; provider/live continuation compatibility не проверяется без явного разрешения.
+- Следующий шаг: запустить `npm.cmd run test:l05`.
+
+### STEP-0203 — 2026-09-07 — durable runner regression PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; continuation использует существующий durable runner без L05 regressions.
+- Изменения и назначение: подтверждены chain gate, concurrent single-submit, submit-unknown protection, recovery, output retry, provider errors, cancellation и upload cache после source/server changes.
+- Файлы/модули: rebuilt `dist/`, `src/mcp/server.ts`, `src/execution/schemas.ts`, `tests/execution/l05.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:l05` — `PASS`, 15 тестов, 0 failures; build внутри команды — `PASS`; SQLite experimental warning ожидаем. MCP, full offline, explicit typecheck/build и `git diff --check` — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: нужен stdio schema/handshake regression и общий offline acceptance.
+- Следующий шаг: запустить `npm.cmd run test:mcp`.
+
+### STEP-0204 — 2026-09-07 — MCP stdio regression PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; stdio transport and tool registration remain compatible.
+- Изменения и назначение: initialize/tools-list, catalog, graph and local execution flows passed after adding `continuation` to the review schema; no live provider operation was invoked.
+- Файлы/модули: rebuilt `dist/`, `src/execution/schemas.ts`, `src/mcp/server.ts`, `tests/mcp/stdio.test.mjs`, `PROGRESS.md`.
+- Проверки: `npm.cmd run test:mcp` — `PASS`, 1 тест, 0 failures; build внутри команды — `PASS`; SQLite experimental warning ожидаем. Full offline, explicit typecheck/build и `git diff --check` — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: остаётся общий offline regression и финальные explicit checks для этого L06 пункта.
+- Следующий шаг: запустить `npm.cmd run test:acceptance:offline`.
+
+### STEP-0205 — 2026-09-07 — full offline approval continuation regression PASS
+
+- Пакет и статус: L06 / `IN_PROGRESS`; full local regression passes, остаются explicit final checks and handoff.
+- Изменения и назначение: new continuation schema, outbox intent and server execution did not regress L00–L05, L06 result/review flows, or stdio MCP; no live/provider call was made.
+- Файлы/модули: `src/execution/schemas.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `PROGRESS.md`; `dist/` rebuilt by test scripts.
+- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 15, L06 7, MCP 1; всего 40 тестов, 0 failures. SQLite experimental warnings ожидаемы. Explicit typecheck/build и `git diff --check` — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: нужно выполнить explicit typecheck/build и diff check; live approval/provider compatibility остаётся `NOT_RUN` по правилам сессии.
+- Следующий шаг: выполнить `npm.cmd run typecheck`, `npm.cmd run build` и `git diff --check`.
+
+### STEP-0206 — 2026-09-07 — approval continuation explicit checks PASS
+
+- Пакет и статус: L06 / `LOCAL_DONE` для explicit approval continuation; следующий L07/L08 пункт не начинался.
+- Изменения и назначение: финально подтверждены типы, emitted build и отсутствие whitespace errors; continuation остаётся только явно запрошенным, same-chain и идемпотентным.
+- Файлы/модули: `src/execution/schemas.ts`, `src/mcp/server.ts`, `tests/results/l06.test.mjs`, `README.md`, `docs/capabilities.md`, `docs/configuration.md`, `PROGRESS.md`; `dist/` пересобран.
+- Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; `npm.cmd run test:l05` — `PASS` (15); `npm.cmd run test:l06` — `PASS` (7); `npm.cmd run test:mcp` — `PASS` (1); `npm.cmd run test:acceptance:offline` — `PASS` (40 всего); `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings. SQLite experimental warnings ожидаемы.
+- Ограничения/остаток: live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN` по правилу сессии; live provider compatibility и automatic approval не реализуются в этом пункте. L06 теперь остаётся `IN_PROGRESS` только из-за других явно не выбранных/не подтверждённых live границ, следующий пакет не начинать.
+- Следующий шаг: в новой отдельной задаче выбрать следующий пункт по handoff; автоматически не начинать L07/L08.
+
+### STEP-0207 — 2026-09-07 — синхронизирован L06 handoff
+
+- Пакет и статус: L06 / `LOCAL_DONE` для explicit approval continuation; L07/L08 не начинались.
+- Изменения и назначение: верхняя сводка и handoff теперь отражают фактический статус; automatic approval не добавляется, потому что approval без явного continuation не должен запускать генерацию.
+- Файлы/модули: `PROGRESS.md`.
+- Проверки: ранее выполненные typecheck/build/L05/L06/MCP/full offline checks остаются `PASS`; повторный `git diff --check` после этой записи — `NOT_RUN`; live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: live provider compatibility explicit continuation не проверялась и не запускается без явного разрешения.
+- Следующий шаг: повторить `git diff --check`, затем остановиться на завершённом пункте.
+
+### STEP-0208 — 2026-09-07 — финальный diff check PASS
+
+- Пакет и статус: L06 / `LOCAL_DONE` для explicit approval continuation; работа остановлена на выбранном пункте.
+- Изменения и назначение: handoff подтверждает завершение local approval continuation; новые пакеты и live actions не запускались.
+- Файлы/модули: `PROGRESS.md`.
+- Проверки: `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings; ранее зафиксированные typecheck/build/L05/L06/MCP/full offline — `PASS`. Live API, платные генерации, пользовательские assets и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: automatic approval намеренно не реализуется; live provider compatibility explicit continuation остаётся `NOT_RUN`.
+- Следующий шаг: в новой отдельной задаче выбрать следующий пункт по handoff; автоматически не начинать.
+
+### STEP-0209 — 2026-09-07 — разрешён L05 live probe
+
+- Пакет и статус: L05 / `LIVE_PENDING`; пользователь явно разрешил платную тестовую генерацию с коротким параметром 2 секунды для проверки natural expiry/account compatibility.
+- Область и ограничение: harness поддерживает submit/status/output/cancel и read-only expiry, но не имеет отдельного account-wide discovery; известный ephemeral workflow `2087104558464446466` будет использоваться только после проверки его реальной схемы. Natural expiry нельзя гарантировать короткой генерацией и потребует фактического terminal provider marker.
+- Файлы/модули: пока source code не изменён; проверяются `scripts/test-live.mjs`, `src/backends/workflow-api/client.ts`, `ACCEPTANCE.md`, `PROGRESS.md`.
+- Проверки: пользовательские env найдены как `User: API_KEY=set`, `LIVE_CASES=full`, но process env отсутствует; live request и новая генерация ещё `NOT_RUN`. API key не выводится.
+- Ограничения/остаток: не запускать blind retry; после одного разрешённого submit сохранить только обезличенный task ID/результат и не выполнять пользовательские uploads.
+- Следующий шаг: выполнить один read-only запрос JSON workflow `2087104558464446466` без submit, чтобы определить безопасное поле длительности и профиль проверки.
+
+### STEP-0210 — 2026-09-07 — live workflow schema inspected
+
+- Пакет и статус: L05 / `LIVE_PENDING`; read-only preparation passed, no new task was submitted.
+- Изменения и назначение: provider returned workflow `2087104558464446466` with 18 nodes; the video graph has `MiniMaxH3ImageToVideo` and a `PrimitiveFloat` value `8` feeding its frame-length expression, so a one-off 2-second variant is structurally identifiable without user assets.
+- Файлы/модули: source code не изменён; read-only API response проверен через existing Workflow API contract.
+- Проверки: two read-only `getJsonApiFormat` requests — `PASS` (`code=0`, prompt parsed, duration candidate identified); paid submit, status polling and expiry query — `NOT_RUN` at this step. API key не выводился.
+- Ограничения/остаток: the current harness does not expose a duration override or account-wide discovery; one workflow/profile cannot prove account-wide compatibility. Natural expiry needs a previously submitted real task to return an explicit terminal expiry/not-found marker.
+- Следующий шаг: query one previously recorded provider task ID read-only for expiry evidence, then decide whether one authorized 2-second submit is useful and safe.
+
+### STEP-0211 — 2026-09-07 — prior live task did not expire
+
+- Пакет и статус: L05 / `LIVE_PENDING`; natural expiry remains unproven.
+- Изменения и назначение: read-only expiry query targeted the previously recorded real task `2097126350429659137`; provider still returned `SUCCESS`, so this was not treated as expiry evidence and no submit/retry followed.
+- Файлы/модули: source code не изменён; `PROGRESS.md`.
+- Проверки: `npm.cmd run test:live -- --expiry --task-id 2097126350429659137` — `LIVE_FAIL`: `state=SUCCESS`, `code=unknown`, no expiry/not-found marker. API key не выводился.
+- Ограничения/остаток: a completed retained task cannot demonstrate natural expiry; the next authorized submit will be only for the requested short 2-second compatibility probe, not mislabeled as expiry evidence.
+- Следующий шаг: add a narrowly scoped `--duration-seconds` override to the ephemeral harness, then run one 2-second workflow submit.
+
+### STEP-0212 — 2026-09-07 — добавлен duration override для live probe
+
+- Пакет и статус: L05 / `LIVE_PENDING`; harness готов к одному разрешённому короткому submit.
+- Изменения и назначение: `scripts/test-live.mjs` получил только для обычного ephemeral generation probe параметр `--duration-seconds`; он проходит по реальному graph link от video `length/duration` к числовому источнику и меняет snapshot перед durable submit. Upload/cancel/expiry modes этим параметром блокируются.
+- Файлы/модули: `scripts/test-live.mjs`, `PROGRESS.md`.
+- Проверки: `node --check scripts/test-live.mjs` — `PASS`; live submit ещё `NOT_RUN`, source typecheck/build и offline regression после harness change — `NOT_RUN`. API key не выводится.
+- Ограничения/остаток: override сокращает генерацию до 2 секунд, но не может гарантировать natural expiry; один workflow/profile не доказывает account-wide compatibility.
+- Следующий шаг: выполнить ровно один `npm.cmd run test:live -- --workflow-id 2087104558464446466 --duration-seconds 2 --timeout-ms 300000` с User env.
+
+### STEP-0213 — 2026-09-07 — исправлен pre-submit duration token handling
+
+- Пакет и статус: L05 / `LIVE_PENDING`; платный submit ещё не выполнен.
+- Изменения и назначение: первая попытка duration override завершилась до submit, потому что `lossless-json` numeric token не был распознан как обычный JavaScript number. Override теперь принимает только явно числовые `PrimitiveFloat`/`PrimitiveInt` source nodes.
+- Файлы/модули: `scripts/test-live.mjs`, `PROGRESS.md`.
+- Проверки: предыдущий `--duration-seconds 2` probe — `LIVE_FAIL` до submit: `could not find a linked numeric duration/length input`; API key не выводился, provider task не создавался. После fix syntax/live retry — `NOT_RUN`.
+- Ограничения/остаток: сохраняется scope одного известного workflow/profile и одного разрешённого 2-second submit; natural expiry не будет объявлен PASS по успешному short task.
+- Следующий шаг: повторить `node --check scripts/test-live.mjs`, затем один разрешённый live submit.
+
+### STEP-0214 — 2026-09-07 — duration override syntax PASS
+
+- Пакет и статус: L05 / `LIVE_PENDING`; harness syntax validated, ready for the single authorized submit.
+- Изменения и назначение: `--duration-seconds` path parses after the numeric-token fix and remains limited to the regular ephemeral generation mode.
+- Файлы/модули: `scripts/test-live.mjs`, `PROGRESS.md`.
+- Проверки: `node --check scripts/test-live.mjs` — `PASS`; live submit, typecheck/build/offline regression after harness change — `NOT_RUN`; API key не выводится.
+- Ограничения/остаток: this test can provide scoped workflow/profile evidence only; it cannot establish natural expiry or account-wide coverage by itself.
+- Следующий шаг: execute exactly one `--workflow-id 2087104558464446466 --duration-seconds 2` live probe.
+
+### STEP-0215 — 2026-09-07 — short live generation PASS
+
+- Пакет и статус: L05 / `LIVE_PENDING`; one authorized short live generation completed, but natural expiry and account-wide compatibility remain unproven.
+- Изменения и назначение: ephemeral workflow `2087104558464446466` was submitted through the durable runner with the linked video length source overridden to 2 seconds; provider returned outputs successfully. No project/workflow state or user assets were persisted.
+- Файлы/модули: `scripts/test-live.mjs`, `PROGRESS.md`; provider task ID `2097170708909039617` recorded only as sanitized evidence.
+- Проверки: `npm.cmd run test:live -- --workflow-id 2087104558464446466 --duration-seconds 2 --timeout-ms 300000` — `PASS`: `LIVE_DURATION_OVERRIDE: seconds=2`, one `LIVE_SUBMIT`, `LIVE_PASS ... outputs_ready=true`; API key не выводился. Natural-expiry query remains `NOT_RUN` after the prior retained task returned `SUCCESS`; account-wide discovery/compatibility — `NOT_RUN`.
+- Ограничения/остаток: this proves one current workflow/profile submit/status/output path with a short video parameter, not all account workflows/models. Natural expiry cannot be inferred from a successful short task and requires a real task to reach provider expiry.
+- Следующий шаг: update L05 acceptance/capability documentation with this scoped evidence, then run syntax/typecheck/build/offline regression without another live submit.
+
+### STEP-0216 — 2026-09-07 — L05 short probe evidence documented
+
+- Пакет и статус: L05 / `LIVE_PENDING`; scoped live submit/status/output evidence обновлена, natural expiry и account-wide compatibility остаются `NOT_RUN`/unknown.
+- Изменения и назначение: acceptance, capabilities, configuration и README теперь фиксируют 2-second duration override и явно не расширяют его до account-wide или expiry evidence.
+- Файлы/модули: `ACCEPTANCE.md`, `docs/capabilities.md`, `docs/configuration.md`, `README.md`, `PROGRESS.md`.
+- Проверки: live short probe из STEP-0215 — `PASS`; syntax/typecheck/build/offline regression после документации — `NOT_RUN`; новых live submits не планируется.
+- Ограничения/остаток: natural expiry реальной задачи требует provider terminal expiry после ожидания; account-wide compatibility требует дополнительных подтверждённых workflows/models, которых текущий harness/account discovery не предоставляет.
+- Следующий шаг: выполнить `node --check scripts/test-live.mjs`, `npm.cmd run typecheck`, `npm.cmd run build`, затем `npm.cmd run test:acceptance:offline`.
+
+### STEP-0217 — 2026-09-07 — L05 harness checks PASS
+
+- Пакет и статус: L05 / `LIVE_PENDING`; live evidence remains scoped to one workflow/profile.
+- Изменения и назначение: duration override harness and documentation compile/parse cleanly; no further provider request was made.
+- Файлы/модули: `scripts/test-live.mjs`, `ACCEPTANCE.md`, `docs/capabilities.md`, `docs/configuration.md`, `README.md`, `PROGRESS.md`; `dist/` rebuilt.
+- Проверки: `node --check scripts/test-live.mjs` — `PASS`; `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; full offline acceptance — `NOT_RUN`; natural expiry and account-wide compatibility — `NOT_RUN`.
+- Ограничения/остаток: local regression remains to be run; no automatic live retry or extra paid submit.
+- Следующий шаг: запустить `npm.cmd run test:acceptance:offline`.
+
+### STEP-0218 — 2026-09-07 — offline regression после L05 live harness PASS
+
+- Пакет и статус: L05 / `LIVE_PENDING`; short live submit/status/output evidence PASS, natural expiry и account-wide compatibility остаются вне доказанного scope.
+- Изменения и назначение: duration-aware ephemeral harness и обновлённая live documentation не вызвали regressions в локальном execution/recovery/graph/review коде.
+- Файлы/модули: `scripts/test-live.mjs`, `ACCEPTANCE.md`, `docs/capabilities.md`, `docs/configuration.md`, `README.md`, `PROGRESS.md`; `dist/` rebuilt.
+- Проверки: `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 15, L06 7, MCP 1; всего 40 тестов, 0 failures. SQLite experimental warnings ожидаемы. Natural expiry и account-wide compatibility — `NOT_RUN`; новых live submits после STEP-0215 не выполнялось.
+- Ограничения/остаток: natural expiry требует provider task, который реально перейдёт в expiry; account-wide compatibility требует account/workflow discovery или нескольких явно разрешённых workflows. Текущий один workflow не расширяет evidence.
+- Следующий шаг: выполнить `git diff --check`, затем остановиться и не запускать дополнительные live generation без отдельного scope.
+
+### STEP-0219 — 2026-09-07 — L05 live probe handoff PASS
+
+- Пакет и статус: L05 / `LIVE_PENDING`; один короткий 2-second live generation probe завершён, natural expiry и account-wide compatibility не подтверждены.
+- Изменения и назначение: финальный diff clean; live harness/documentation готовы для следующего явно выбранного scope, дополнительные платные вызовы не выполнялись.
+- Файлы/модули: `scripts/test-live.mjs`, `ACCEPTANCE.md`, `docs/capabilities.md`, `docs/configuration.md`, `README.md`, `PROGRESS.md`; `dist/` пересобран.
+- Проверки: `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings; typecheck/build/syntax/full offline и live short probe — `PASS`; natural expiry и account-wide compatibility — `NOT_RUN`.
+- Ограничения/остаток: natural expiry требует фактического provider expiry существующей задачи, а account-wide compatibility нельзя доказать одним workflow/profile без discovery или дополнительных разрешённых workflows.
+- Следующий шаг: отдельным решением выбрать, нужен ли отдельный длительный expiry scope или дополнительные workflow IDs; автоматически не запускать.
+
+### STEP-0220 — 2026-09-07 — синхронизирована L05 live summary
+
+- Пакет и статус: L05 / `LIVE_PENDING`; summary теперь отражает выполненный короткий live submit.
+- Изменения и назначение: устранено устаревшее утверждение, что новый submit не выполнялся; зафиксирован ровно один разрешённый 2-second probe без пользовательских assets.
+- Файлы/модули: `PROGRESS.md`.
+- Проверки: все проверки из STEP-0219 остаются `PASS`; повторный `git diff --check` после этой записи — `NOT_RUN`; natural expiry и account-wide compatibility — `NOT_RUN`.
+- Ограничения/остаток: live evidence остаётся scoped к workflow `2087104558464446466` и configured profile.
+- Следующий шаг: повторить `git diff --check`, затем остановиться.
+
+### STEP-0221 — 2026-09-07 — финальный L05 live diff check PASS
+
+- Пакет и статус: L05 / `LIVE_PENDING`; разрешённый короткий live probe завершён, работа остановлена без дополнительных платных вызовов.
+- Изменения и назначение: summary/handoff и acceptance evidence согласованы с фактическим одним 2-second submit/status/output PASS.
+- Файлы/модули: `scripts/test-live.mjs`, `ACCEPTANCE.md`, `docs/capabilities.md`, `docs/configuration.md`, `README.md`, `PROGRESS.md`; `dist/` пересобран.
+- Проверки: `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings; `node --check`, typecheck, build, full offline acceptance и live short probe — `PASS`. Natural expiry и account-wide compatibility — `NOT_RUN`.
+- Ограничения/остаток: один workflow/profile не доказывает account-wide compatibility; успешная 2-second задача не является natural-expiry evidence.
+- Следующий шаг: для natural expiry нужен отдельный длительный/ожидающий scope, а для account-wide — дополнительные явно выбранные workflows; автоматически не запускать.
+
+### STEP-0222 — 2026-09-07 — актуализированы L05 counters
+
+- Пакет и статус: L05 / `LIVE_PENDING`; short live compatibility probe завершён, две широкие проверки остаются ограниченными.
+- Изменения и назначение: сводные offline counts обновлены до 40 тестов и 7 L06 тестов; новых runtime/live действий нет.
+- Файлы/модули: `PROGRESS.md`.
+- Проверки: `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings; все проверки STEP-0221 остаются `PASS`. Natural expiry и account-wide compatibility — `NOT_RUN`.
+- Ограничения/остаток: для продолжения нужны либо отдельный expiry-wait scope, либо дополнительные workflow IDs/account discovery.
+- Следующий шаг: запросить недостающий scope/IDs перед следующими live вызовами; автоматически не запускать.
+
+### STEP-0223 — 2026-09-07 — L05 live scope gate подтверждён
+
+- Пакет и статус: L05 / `LIVE_PENDING`; локальная реализация и текущие scoped live cases завершены, natural expiry существующей задачи и account-wide compatibility остаются недоказанными.
+- Изменения и назначение: проверены последний handoff, план L05, live harness и связанные runner/recovery tests. Harness принимает `RUNNINGHUB_LIVE_CASES=full` и ключ, но это не задаёт отсутствующие case IDs и не заменяет явное разрешение на live/платные вызовы.
+- Файлы/модули: `PROGRESS.md`.
+- Проверки: чтение `scripts/test-live.mjs`, `src/execution/runner.ts`, `src/execution/results.ts`, L05/L06 tests и L05 plan criteria — `PASS`; live API, платные генерации, upload пользовательских данных и внешние изменения — `NOT_RUN` из-за отсутствия явного разрешения и выбранных case IDs; typecheck/build/offline tests — `NOT_RUN`, runtime-код не менялся.
+- Ограничения/остаток: `natural expiry` требует разрешённой задачи, которую можно безопасно ожидать до provider expiry; `account-wide compatibility` требует явно выбранных дополнительных workflow IDs или account discovery. Переменные окружения сами по себе эти scope не предоставляют.
+- Следующий шаг: получить явное разрешение на нужный live scope и соответствующие workflow/task IDs; до этого не запускать новые live calls и не переходить к L07/L08.
+
+### STEP-0224 — 2026-09-07 — L05 scope gate локально проверен
+
+- Пакет и статус: L05 / `LIVE_PENDING`; scope gate подтверждён без provider requests.
+- Изменения и назначение: после записи STEP-0223 проверены отсутствие регрессий и корректность журнала; runtime-код и live harness не изменялись.
+- Файлы/модули: `PROGRESS.md`; `dist/` пересобран штатными build/test-командами.
+- Проверки: `npm.cmd run typecheck` — `PASS`; `npm.cmd run build` — `PASS`; `npm.cmd run test:acceptance:offline` — `PASS`: unit 3, contract 2, graph 8, L03 4, L04 4, L05 15, L06 7, MCP 1, всего 40 тестов, 0 failures; SQLite experimental warnings ожидаемы. `git diff --check` — `PASS` с ожидаемыми LF→CRLF warnings; live API, платные генерации, upload пользовательских данных и внешние изменения — `NOT_RUN`.
+- Ограничения/остаток: natural expiry и account-wide compatibility остаются `NOT_RUN`; требуется отдельное явное разрешение и выбранные case IDs.
+- Следующий шаг: остановиться до получения live scope/IDs; новые live calls и L07/L08 не начинать автоматически.

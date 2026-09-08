@@ -9,7 +9,7 @@ This document describes the local L05 boundary. It is not a live account capabil
 | Price estimation | local snapshot | pinned pricing file; not billing authority |
 | SQLite operational schema | local | migration/reopen unit test |
 | MCP stdio initialize/tools/list/call | local | child-process transport test |
-| Full-graph RunningHub execution | scoped live evidence | submit/status/output, upload, one structural graph workflow, cancel, and unknown-task not-found reconciliation have scoped evidence; natural expiry and account-wide compatibility remain unknown |
+| Full-graph RunningHub execution | scoped live evidence | submit/status/output, one 2-second video workflow, upload, one structural graph workflow, cancel, and unknown-task not-found reconciliation have scoped evidence; natural expiry and account-wide compatibility remain unknown |
 | Graph editing/revisions | local | L02 graph codec, atomic operations, CAS revisions, SQLite restore tests |
 | Durable execution plan, reservation, expiry reconciliation, and job recovery contracts | local synthetic | `tests/execution/l05.test.mjs`, `ACCEPTANCE.md` `L05-RECOVERY-002`; provider-specific expiry capability remains unknown until live evidence |
 | Project-owned asset inspection, hash guard, tagged upload/cache, and submit substitution | local synthetic + scoped live upload | `tests/execution/l05.test.mjs`, `tests/mcp/stdio.test.mjs`, `ACCEPTANCE.md` `L05-LIVE-003`; only a synthetic asset upload was live-verified |
@@ -17,4 +17,7 @@ This document describes the local L05 boundary. It is not a live account capabil
 | Result originals and MCP resource links | local | `rh_get_results` returns opaque `runninghub://result/<id>` links; `resources/read` rechecks project root and content hash |
 | Derived image previews and video posters | local | `DerivedMediaService` creates hash-aware PNG derivatives through fixed local ffmpeg invocation; `runninghub://derived/<id>` links are integrity-checked by `resources/read` |
 | Result manifests and outbox publication | local | `ResultManifestService`, `.runninghub/runs/<job_id>/manifest.json`, migration 6 and L06 transport test |
-| Result review and chain gate | not implemented | L06 |
+| Result review events | local | `rh_review_result` persists one decision per saved result; repeated event IDs are idempotent and `rh_get_results` returns the current state |
+| Explicit changes-requested revision | local | `rh_review_result` accepts a typed `revision_request`, creates a child revision and same-chain work item, and does not submit it |
+| Review chain gate | local | `reserveJob` blocks active, incomplete-download, and unreviewed work in the same project chain |
+| Explicit approval continuation | local | `rh_review_result` durably records an opt-in continuation intent and runs one prepared same-chain plan idempotently; bare approval does not submit |

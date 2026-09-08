@@ -13,6 +13,7 @@ export type ErrorCode =
   | "CAPABILITY_UNKNOWN"
   | "CAPABILITY_UNSUPPORTED"
   | "PROVIDER_ERROR"
+  | "REVIEW_PENDING"
   | "INVALID_CONFIGURATION";
 
 export interface StructuredError {

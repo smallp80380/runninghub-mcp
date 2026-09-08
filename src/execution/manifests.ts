@@ -78,7 +78,7 @@ interface ResultManifest {
       readonly content_hash: string;
     }[];
   }[];
-  readonly review: { readonly status: "NOT_READY" };
+  readonly review: { readonly status: "PENDING_REVIEW" };
 }
 
 interface ManifestContext {
@@ -322,7 +322,7 @@ export class ResultManifestService {
         created_at: context.job.created_at,
       },
       outputs: results.map((result) => this.manifestOutput(result, derivedByResult.get(result.id) ?? [])),
-      review: { status: "NOT_READY" },
+      review: { status: "PENDING_REVIEW" },
     };
     return Uint8Array.from(Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8"));
   }

@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { AppError } from "../errors.js";
 
 const MIGRATIONS = [
   {
@@ -212,6 +213,18 @@ const MIGRATIONS = [
         ON outbox(kind, aggregate_id);
     `,
   },
+  {
+    id: 7,
+    sql: `
+      CREATE TABLE IF NOT EXISTS review_revisions (
+        review_event_id TEXT PRIMARY KEY REFERENCES review_events(id) ON DELETE CASCADE,
+        source_revision_id TEXT NOT NULL REFERENCES workflow_revisions(id),
+        revision_id TEXT NOT NULL REFERENCES workflow_revisions(id),
+        work_item_id TEXT NOT NULL REFERENCES work_items(id),
+        created_at TEXT NOT NULL
+      );
+    `,
+  },
 ] as const;
 
 export interface WorkflowRevisionRow {
@@ -357,6 +370,32 @@ export interface DerivedResultRow {
   readonly content_hash: string;
   readonly created_at: string;
   readonly updated_at: string;
+}
+
+export type ReviewDecision = "APPROVED" | "CHANGES_REQUESTED" | "REJECTED";
+
+export interface ReviewEventRow {
+  readonly id: string;
+  readonly job_id: string;
+  readonly result_id: string;
+  readonly output_hash: string;
+  readonly decision: ReviewDecision;
+  readonly feedback: string | null;
+  readonly user_message_ref: string | null;
+  readonly created_at: string;
+}
+
+export interface ReviewEventWriteResult {
+  readonly row: ReviewEventRow;
+  readonly inserted: boolean;
+}
+
+export interface ReviewRevisionRow {
+  readonly review_event_id: string;
+  readonly source_revision_id: string;
+  readonly revision_id: string;
+  readonly work_item_id: string;
+  readonly created_at: string;
 }
 
 export interface OutboxRow {
@@ -583,6 +622,34 @@ export class Storage {
         this.db.exec("COMMIT");
         return existingJob;
       }
+      const planContext = this.db
+        .prepare(
+          `SELECT w.project_id, w.chain_id, w.id AS work_item_id
+             FROM execution_plans p
+             JOIN work_items w ON w.id = p.work_item_id
+            WHERE p.id = ?`,
+        )
+        .get(planId) as { project_id: string; chain_id: string; work_item_id: string } | undefined;
+      if (!planContext) throw new AppError("PROJECT_NOT_FOUND", `Execution plan ${planId} was not found.`, { recoverable: true });
+      if (planContext.project_id !== projectId) {
+        throw new AppError("REQUEST_CONFLICT", `Execution plan ${planId} does not belong to project ${projectId}.`, { recoverable: false });
+      }
+      const blocker = this.findChainBlocker(planContext.project_id, planContext.chain_id);
+      if (blocker) {
+        throw new AppError("REVIEW_PENDING", `Review chain ${planContext.chain_id} is not ready for another execution.`, {
+          context: {
+            project_id: planContext.project_id,
+            chain_id: planContext.chain_id,
+            blocking_work_item_id: blocker.work_item_id,
+            blocking_job_id: blocker.job_id,
+            reason: blocker.reason,
+          },
+          recoverable: true,
+          suggestedFix: blocker.reason === "review_pending"
+            ? "Review every saved result in the blocking job before starting another execution."
+            : "Wait for the blocking execution or finish its result download before starting another execution.",
+        });
+      }
       if (!existingRequest) this.db.prepare("INSERT INTO requests (project_id, request_key, plan_id, created_at) VALUES (?, ?, ?, ?)").run(projectId, requestId, planId, new Date().toISOString());
       const id = randomUUID();
       const now = new Date().toISOString();
@@ -595,6 +662,48 @@ export class Storage {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  private findChainBlocker(projectId: string, chainId: string): { work_item_id: string; job_id: string; reason: string } | undefined {
+    const rows = this.db
+      .prepare(
+        `SELECT w.id AS work_item_id, j.id AS job_id, j.execution_state, j.artifact_state,
+                (SELECT COUNT(*) FROM results r WHERE r.job_id = j.id) AS result_count,
+                (SELECT COUNT(*)
+                   FROM results r
+                  WHERE r.job_id = j.id
+                    AND NOT EXISTS (SELECT 1 FROM review_events e WHERE e.result_id = r.id)) AS unreviewed_count
+           FROM execution_plans p
+           JOIN work_items w ON w.id = p.work_item_id
+           JOIN jobs j ON j.plan_id = p.id
+          WHERE w.project_id = ? AND w.chain_id = ?
+          ORDER BY j.updated_at, j.id`,
+      )
+      .all(projectId, chainId) as Array<{
+        work_item_id: string;
+        job_id: string;
+        execution_state: string;
+        artifact_state: string;
+        result_count: number;
+        unreviewed_count: number;
+      }>;
+
+    for (const row of rows) {
+      if (["READY", "SUBMITTING", "SUBMIT_UNKNOWN", "RUNNING"].includes(row.execution_state)) {
+        return { work_item_id: row.work_item_id, job_id: row.job_id, reason: "execution_active" };
+      }
+      if (row.execution_state !== "SUCCEEDED") continue;
+      if (row.artifact_state !== "READY") {
+        return { work_item_id: row.work_item_id, job_id: row.job_id, reason: "download_incomplete" };
+      }
+      if (row.result_count === 0) {
+        return { work_item_id: row.work_item_id, job_id: row.job_id, reason: "results_not_downloaded" };
+      }
+      if (row.unreviewed_count > 0) {
+        return { work_item_id: row.work_item_id, job_id: row.job_id, reason: "review_pending" };
+      }
+    }
+    return undefined;
   }
 
   claimSubmit(jobId: string, submitIntent: string): boolean {
@@ -668,6 +777,63 @@ export class Storage {
            content_hash=excluded.content_hash, updated_at=excluded.updated_at`,
       )
       .run(row.id, row.result_id, row.kind, row.schema_version, row.source_hash, row.relative_path, row.mime, row.size_bytes, row.content_hash, row.created_at, row.updated_at);
+  }
+
+  getReviewEvent(id: string): ReviewEventRow | undefined {
+    return this.db.prepare("SELECT * FROM review_events WHERE id = ?").get(id) as unknown as ReviewEventRow | undefined;
+  }
+
+  listReviewEvents(resultId: string): ReviewEventRow[] {
+    return this.db.prepare("SELECT * FROM review_events WHERE result_id = ? ORDER BY created_at, id").all(resultId) as unknown as ReviewEventRow[];
+  }
+
+  saveReviewEvent(row: ReviewEventRow): ReviewEventWriteResult {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existingById = this.getReviewEvent(row.id);
+      if (existingById) {
+        this.db.exec("COMMIT");
+        return { row: existingById, inserted: false };
+      }
+      const existingByResult = this.db
+        .prepare("SELECT * FROM review_events WHERE result_id = ? ORDER BY created_at, id LIMIT 1")
+        .get(row.result_id) as unknown as ReviewEventRow | undefined;
+      if (existingByResult) {
+        this.db.exec("COMMIT");
+        return { row: existingByResult, inserted: false };
+      }
+      this.db
+        .prepare(
+          `INSERT INTO review_events
+            (id, job_id, result_id, output_hash, decision, feedback, user_message_ref, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(row.id, row.job_id, row.result_id, row.output_hash, row.decision, row.feedback, row.user_message_ref, row.created_at);
+      const stored = this.getReviewEvent(row.id);
+      if (!stored) throw new Error(`Review event ${row.id} was not persisted`);
+      this.db.exec("COMMIT");
+      return { row: stored, inserted: true };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getReviewRevision(reviewEventId: string): ReviewRevisionRow | undefined {
+    return this.db.prepare("SELECT * FROM review_revisions WHERE review_event_id = ?").get(reviewEventId) as unknown as ReviewRevisionRow | undefined;
+  }
+
+  saveReviewRevision(row: ReviewRevisionRow): ReviewRevisionRow {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO review_revisions
+           (review_event_id, source_revision_id, revision_id, work_item_id, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(row.review_event_id, row.source_revision_id, row.revision_id, row.work_item_id, row.created_at);
+    const stored = this.getReviewRevision(row.review_event_id);
+    if (!stored) throw new Error(`Review revision ${row.review_event_id} was not persisted`);
+    return stored;
   }
 
   getWorkflowRevision(id: string): WorkflowRevisionRow | undefined {

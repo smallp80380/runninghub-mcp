@@ -161,14 +161,21 @@ export class ResultDownloadService {
     if (!project) throw new AppError("PROJECT_NOT_FOUND", `Project ${plan.project_id} was not found.`, { recoverable: true });
     if (!project.canonical_root || !project.output_root) throw new AppError("INVALID_CONFIGURATION", `Project ${project.id} has no configured output root.`, { recoverable: true });
 
-    const outputs = await this.backend.outputs(job.provider_task_id);
-    if (!outputs.outputs.length) throw new AppError("DOWNLOAD_FAILED", `Provider task ${job.provider_task_id} returned no outputs.`, { recoverable: true });
-    const outputDirectory = this.prepareOutputDirectory(project, job);
-    const results: DownloadedResult[] = [];
-    for (const output of outputs.outputs) {
-      results.push(await this.downloadOne(project, job, outputDirectory, output));
+    this.storage.markArtifact(jobId, "PENDING");
+    try {
+      const outputs = await this.backend.outputs(job.provider_task_id);
+      if (!outputs.outputs.length) throw new AppError("DOWNLOAD_FAILED", `Provider task ${job.provider_task_id} returned no outputs.`, { recoverable: true });
+      const outputDirectory = this.prepareOutputDirectory(project, job);
+      const results: DownloadedResult[] = [];
+      for (const output of outputs.outputs) {
+        results.push(await this.downloadOne(project, job, outputDirectory, output));
+      }
+      this.storage.markArtifact(jobId, "READY");
+      return results;
+    } catch (error) {
+      this.storage.markArtifact(jobId, "FAILED");
+      throw error;
     }
-    return results;
   }
 
   private prepareOutputDirectory(project: ProjectRow, job: JobRow): string {

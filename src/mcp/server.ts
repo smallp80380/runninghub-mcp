@@ -11,9 +11,10 @@ import { AssetProvider } from "../execution/assets.js";
 import { DerivedMediaService, type DerivedResult } from "../execution/derivatives.js";
 import { ResultManifestService } from "../execution/manifests.js";
 import { ResultDownloadService } from "../execution/results.js";
+import { ReviewService } from "../execution/reviews.js";
 import { type ExecutionPlan } from "../execution/types.js";
 import { jobHandle, planFromRow, planToRow, DurableWorkflowRunner } from "../execution/runner.js";
-import { assetToolSchema, getResultsSchema, jobSchema, prepareGenerationSchema, runWorkflowSchema } from "../execution/schemas.js";
+import { assetToolSchema, getResultsSchema, jobSchema, prepareGenerationSchema, reviewResultSchema, runWorkflowSchema } from "../execution/schemas.js";
 import { AppError, errorResult, jsonText, okResult } from "../errors.js";
 import { exportApiGraph, importApiGraph } from "../graph/codec.js";
 import { type GraphOperation } from "../graph/operations.js";
@@ -119,6 +120,48 @@ function derivedResourceLink(derived: DerivedResult): ResourceLink {
     mimeType: derived.mime,
     description: `Validated local derived ${derived.kind}.`,
   };
+}
+
+function validateApprovalContinuation(storage: Storage, resultId: string, continuation: { readonly plan_id: string; readonly request_id: string }): void {
+  const result = storage.getResultById(resultId);
+  if (!result) throw new AppError("PROJECT_NOT_FOUND", `Result ${resultId} was not found.`, { recoverable: true });
+  const sourceJob = storage.getJob(result.job_id);
+  if (!sourceJob) throw new AppError("PROJECT_NOT_FOUND", `Job ${result.job_id} was not found.`, { recoverable: false });
+  const sourcePlan = storage.getExecutionPlan(sourceJob.plan_id);
+  const targetPlan = storage.getExecutionPlan(continuation.plan_id);
+  if (!sourcePlan || !targetPlan) throw new AppError("PROJECT_NOT_FOUND", "The review continuation references a missing execution plan.", { recoverable: true });
+  const sourceWorkItem = storage.getWorkItem(sourcePlan.work_item_id);
+  const targetWorkItem = storage.getWorkItem(targetPlan.work_item_id);
+  if (!sourceWorkItem || !targetWorkItem) throw new AppError("PROJECT_NOT_FOUND", "The review continuation references a missing work item.", { recoverable: false });
+  if (sourcePlan.project_id !== targetPlan.project_id || sourceWorkItem.chain_id !== targetWorkItem.chain_id) {
+    throw new AppError("REVIEW_PENDING", "An approval continuation must stay in the reviewed project and chain.", {
+      recoverable: true,
+      suggestedFix: "Prepare the continuation plan for the same project and review chain.",
+    });
+  }
+  if (sourcePlan.id === targetPlan.id || sourcePlan.work_item_id === targetPlan.work_item_id) {
+    throw new AppError("INVALID_CONFIGURATION", "An approval continuation must reference a different work item.", { recoverable: true });
+  }
+  if (targetWorkItem.state !== "REQUESTED") {
+    throw new AppError("INVALID_CONFIGURATION", `Continuation work item ${targetWorkItem.id} is not open for execution.`, { recoverable: true });
+  }
+}
+
+function continuationIntentPayload(value: { readonly review_event_id: string; readonly plan_id: string; readonly request_id: string }): string {
+  return JSON.stringify(value);
+}
+
+function parseContinuationIntent(payload: string): { readonly review_event_id: string; readonly plan_id: string; readonly request_id: string } {
+  let value: unknown;
+  try {
+    value = JSON.parse(payload);
+  } catch {
+    throw new AppError("INVALID_CONFIGURATION", "Stored approval continuation intent is not valid JSON.", { recoverable: false });
+  }
+  if (!value || typeof value !== "object" || typeof (value as { review_event_id?: unknown }).review_event_id !== "string" || typeof (value as { plan_id?: unknown }).plan_id !== "string" || typeof (value as { request_id?: unknown }).request_id !== "string") {
+    throw new AppError("INVALID_CONFIGURATION", "Stored approval continuation intent is malformed.", { recoverable: false });
+  }
+  return value as { readonly review_event_id: string; readonly plan_id: string; readonly request_id: string };
 }
 
 function readStoredResource(
@@ -279,6 +322,7 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
   const assetProvider = new AssetProvider(storage);
   const workflowLibrary = new WorkflowLibrary(defaultWorkflowCards);
   const manifest = readCatalogManifest(config.catalogDir);
+  const reviewService = new ReviewService(storage, revisions, projects);
   const server = new McpServer({ name: "runninghub-mcp", version: "0.1.0" });
 
   server.resource(
@@ -673,22 +717,95 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
         const planRow = storage.getExecutionPlan(row.plan_id);
         if (!planRow) throw new AppError("PROJECT_NOT_FOUND", `Execution plan ${row.plan_id} was not found.`, { recoverable: false });
            const backend = configuredWorkflowBackend(config, planRow.backend_profile_id);
-           const results = await new ResultDownloadService(storage, backend).download(input.job_id);
-           const derived = await new DerivedMediaService(storage).derive(results.map((result) => result.result_id));
-           const manifest = new ResultManifestService(storage).create(input.job_id, backend.api_family);
-           const originalLinks = results.map(resultResourceLink);
-           const derivedLinks = derived.results.map(derivedResourceLink);
-           const enrichedResults = results.map((result, index) => ({
-             ...result,
-             resource_uri: originalLinks[index]?.uri,
-             derived: derived.results.filter((item) => item.result_id === result.result_id).map((item) => ({ ...item, resource_uri: derivedUri(item.derived_id) })),
-           }));
-           return { content: [jsonText(okResult({ job_id: input.job_id, results: enrichedResults, manifest }, [...derived.warnings])), ...originalLinks, ...derivedLinks] };
-      } catch (error) {
-        return { isError: true, content: [jsonText(errorResult(error))] };
-      }
-    },
-  );
+            const results = await new ResultDownloadService(storage, backend).download(input.job_id);
+            const derived = await new DerivedMediaService(storage).derive(results.map((result) => result.result_id));
+            const manifest = new ResultManifestService(storage).create(input.job_id, backend.api_family);
+             const review = reviewService.getJobSummary(input.job_id);
+            const originalLinks = results.map(resultResourceLink);
+            const derivedLinks = derived.results.map(derivedResourceLink);
+            const enrichedResults = results.map((result, index) => ({
+              ...result,
+              resource_uri: originalLinks[index]?.uri,
+              review: review.results.find((item) => item.result_id === result.result_id),
+              derived: derived.results.filter((item) => item.result_id === result.result_id).map((item) => ({ ...item, resource_uri: derivedUri(item.derived_id) })),
+            }));
+            return { content: [jsonText(okResult({ job_id: input.job_id, results: enrichedResults, manifest, review }, [...derived.warnings])), ...originalLinks, ...derivedLinks] };
+       } catch (error) {
+         return { isError: true, content: [jsonText(errorResult(error))] };
+       }
+     },
+   );
+
+    server.tool(
+      "rh_review_result",
+      "Record one idempotent user review for a saved result; an explicit approved continuation may run one already prepared next plan.",
+       reviewResultSchema,
+       async (input) => {
+         try {
+           const { continuation, ...reviewInput } = input;
+           if (continuation && input.decision !== "APPROVED") {
+             throw new AppError("INVALID_CONFIGURATION", "continuation is allowed only with APPROVED.", {
+               recoverable: true,
+               suggestedFix: "Approve the saved result first, then request a continuation explicitly.",
+             });
+           }
+           if (continuation) validateApprovalContinuation(storage, input.result_id, continuation);
+           const review = reviewService.review({
+             ...reviewInput,
+             ...(input.revision_request ? {
+               revision_request: {
+                 ...input.revision_request,
+                 operations: input.revision_request.operations as unknown as GraphOperation[],
+               },
+             } : {}),
+           } as unknown as Parameters<ReviewService["review"]>[0]);
+           if (!continuation) return { content: [jsonText(okResult(review))] };
+
+           const intentPayload = {
+             review_event_id: review.event.id,
+             plan_id: continuation.plan_id,
+             request_id: continuation.request_id,
+           };
+           const existingIntent = storage.getOutboxByAggregate("approval_continuation", review.event.id);
+           if (existingIntent) {
+             const storedIntent = parseContinuationIntent(existingIntent.payload_json);
+             if (storedIntent.plan_id !== intentPayload.plan_id || storedIntent.request_id !== intentPayload.request_id) {
+               throw new AppError("REQUEST_CONFLICT", `Review event ${review.event.id} already has a different continuation intent.`, {
+                 recoverable: false,
+                 suggestedFix: "Retry the original approval continuation or prepare a new reviewed result.",
+               });
+             }
+           } else {
+             const now = new Date().toISOString();
+             storage.enqueueOutbox({
+               id: `approval-continuation:${review.event.id}`,
+               kind: "approval_continuation",
+               aggregate_id: review.event.id,
+               payload_json: continuationIntentPayload(intentPayload),
+               published_at: null,
+               created_at: now,
+             });
+           }
+           const continuationPlanRow = storage.getExecutionPlan(continuation.plan_id);
+           if (!continuationPlanRow) throw new AppError("PROJECT_NOT_FOUND", `Execution plan ${continuation.plan_id} was not found.`, { recoverable: true });
+           const backend = configuredWorkflowBackend(config, continuationPlanRow.backend_profile_id);
+           const job = await new DurableWorkflowRunner(storage, backend).run(planFromRow(continuationPlanRow), continuation.request_id);
+           storage.markOutboxPublished(`approval-continuation:${review.event.id}`);
+           return {
+             content: [jsonText(okResult({
+               ...review,
+               continuation: {
+                 ...intentPayload,
+                 idempotent: Boolean(existingIntent),
+                 job,
+               },
+             }))]
+           };
+         } catch (error) {
+          return { isError: true, content: [jsonText(errorResult(error))] };
+       }
+     },
+   );
 
   server.tool(
     "rh_get_capabilities",
@@ -723,8 +840,8 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
                   polling: config.workflowApi ? "configured_not_verified" : "capability_unknown",
                   upload: config.workflowApi?.routes.upload ? "configured_not_verified" : "capability_unknown",
                 },
-                  supported_now: ["catalog_read", "payload_validation", "price_estimation", "local_graph_editing", "local_revisions", "api_graph_export", "project_context", "scene_resolution", "asset_hash_index", "asset_inspection", "asset_prepare", "workflow_library_search", "execution_plan_prepare", "job_status", "result_download", "result_resource_links", "result_preview", "result_poster", "result_manifest", "result_manifest_outbox"],
-                 not_yet_implemented: ["result_review", "review_gate"],
+                    supported_now: ["catalog_read", "payload_validation", "price_estimation", "local_graph_editing", "local_revisions", "api_graph_export", "project_context", "scene_resolution", "asset_hash_index", "asset_inspection", "asset_prepare", "workflow_library_search", "execution_plan_prepare", "job_status", "result_download", "result_resource_links", "result_preview", "result_poster", "result_manifest", "result_manifest_outbox", "result_review", "changes_requested_revision", "review_chain_gate", "approval_continuation"],
+                  not_yet_implemented: ["automatic_approval"],
               }),
             ),
           ],

@@ -10,7 +10,7 @@ The server has no embedded credentials and never accepts an API key in tool argu
 | `RUNNINGHUB_PROJECT_ROOT` | unset | Reserved project root for later packages |
 | `RUNNINGHUB_FFMPEG_PATH` | `ffmpeg` on `PATH` | Local executable used for image previews and video posters |
 
-Successful `rh_get_results` calls also write an immutable manifest to `.runninghub/runs/<job_id>/manifest.json` under the registered project root. SQLite stores its idempotent `result_manifest` publication event in the outbox; review state remains `NOT_READY` until the review package is implemented.
+Successful `rh_get_results` calls also write an immutable manifest to `.runninghub/runs/<job_id>/manifest.json` under the registered project root. SQLite stores its idempotent `result_manifest` publication event in the outbox; the manifest review snapshot starts at `PENDING_REVIEW`. `rh_review_result` stores the user decision as a durable idempotent event. With `CHANGES_REQUESTED`, an explicit typed `revision_request` creates a child local revision and a new work item in the original chain; it never prepares or submits a provider task. A bare `APPROVED` never starts another generation. An explicit `continuation` can durably arm one already prepared same-chain plan and submit it idempotently; the continuation still requires the configured backend. Subsequent `rh_get_results` calls return the current review state.
 
 To enable the L05 Workflow API adapter, set only the API key. It is read into process memory and is never accepted in MCP arguments, stored in SQLite, or returned by capabilities:
 
@@ -25,6 +25,8 @@ The adapter determines the official host and routes internally: `https://www.run
 The opt-in structural probe is separate from the server tools: `npm.cmd run test:live -- --structural-graph --workflow-id <numeric-id> --resize-width <n> --resize-height <n>`. It requires `RUNNINGHUB_LIVE_CASES=full` and explicit permission for a paid submit. It refuses ambiguous resize-node selection and keeps all state ephemeral.
 
 The opt-in cancellation probe is also separate from server tools: `npm.cmd run test:live -- --cancel --workflow-id <numeric-id>`. It requires `RUNNINGHUB_LIVE_CASES=full` and explicit permission for one submit followed by provider cancellation; it keeps workflow and task state ephemeral.
+
+The ephemeral generation probe accepts `--duration-seconds <n>` for a supported linked video length input. This changes only the in-memory submitted snapshot; it is intended for a short authorized probe and does not prove account-wide workflow compatibility or natural task expiry.
 
 For a clean offline run from the repository root:
 

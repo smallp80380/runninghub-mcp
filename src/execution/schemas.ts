@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { graphOperationSchema } from "../graph/schemas.js";
 
 export const prepareGenerationSchema = {
   work_item_id: z.string().min(1),
@@ -30,6 +31,25 @@ export const jobSchema = {
 
 export const getResultsSchema = {
   job_id: z.string().min(1),
+};
+
+export const reviewResultSchema = {
+  result_id: z.string().min(1),
+  decision: z.enum(["APPROVED", "CHANGES_REQUESTED", "REJECTED"]),
+  feedback: z.string().min(1).optional(),
+  user_message_ref: z.string().min(1).optional(),
+  review_event_id: z.string().min(1).optional(),
+  continuation: z.object({
+    plan_id: z.string().min(1),
+    request_id: z.string().min(1),
+  }).strict().optional(),
+  revision_request: z.object({
+    reason: z.string().min(1),
+    operations: z.array(graphOperationSchema).min(1),
+    user_request: z.string().min(1).optional(),
+    request_kind: z.string().min(1).optional(),
+    allowed_outputs: z.array(z.string().min(1)).min(1).optional(),
+  }).strict().optional(),
 };
 
 export const assetToolSchema = {
