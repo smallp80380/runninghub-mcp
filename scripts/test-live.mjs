@@ -9,8 +9,12 @@ import { SqliteRevisionPersistence } from "../dist/storage/revisions.js";
 import { exportApiGraph, hashGraph, importApiGraph } from "../dist/graph/codec.js";
 import { prepareResizeGraph } from "../dist/graph/structuralProbe.js";
 import { AssetProvider } from "../dist/execution/assets.js";
-import { DurableWorkflowRunner } from "../dist/execution/runner.js";
+import { DurableWorkflowRunner, planToRow } from "../dist/execution/runner.js";
 import { WorkflowApiClient } from "../dist/backends/workflow-api/client.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createServer } from "../dist/mcp/server.js";
+import { createEmptyGraph } from "../dist/graph/types.js";
 
 const apiKey = process.env.RUNNINGHUB_WORKFLOW_API_KEY?.trim();
 const liveCases = process.env.RUNNINGHUB_LIVE_CASES?.trim().toLowerCase();
@@ -20,6 +24,7 @@ const uploadOnly = process.argv.includes("--upload-only");
 const structuralGraph = process.argv.includes("--structural-graph");
 const cancelProbe = process.argv.includes("--cancel");
 const expiryProbe = process.argv.includes("--expiry");
+const resultResourceProbe = process.argv.includes("--result-resource");
 const resizeNodeId = argumentValue("--resize-node-id");
 const resizeWidth = integerArgument("--resize-width");
 const resizeHeight = integerArgument("--resize-height");
@@ -39,6 +44,9 @@ if (!apiKey || liveCases !== "full") {
   process.exitCode = 2;
 } else if ((uploadOnly || structuralGraph || cancelProbe) && expiryProbe) {
   console.error("NOT_RUN: --expiry is read-only and cannot be combined with another probe mode.");
+  process.exitCode = 2;
+} else if (resultResourceProbe && (uploadOnly || structuralGraph || cancelProbe || expiryProbe)) {
+  console.error("NOT_RUN: --result-resource cannot be combined with another probe mode.");
   process.exitCode = 2;
 } else if (structuralGraph && cancelProbe) {
   console.error("NOT_RUN: --structural-graph cannot be combined with --cancel.");
@@ -64,7 +72,10 @@ if (!apiKey || liveCases !== "full") {
 } else if (expiryProbe && (!taskId || !/^\d+$/.test(taskId))) {
   console.error("NOT_RUN: --expiry requires an explicit numeric --task-id.");
   process.exitCode = 2;
-} else if (!uploadOnly && !taskId && !expiryProbe && (!workflowId || !/^\d+$/.test(workflowId))) {
+} else if (resultResourceProbe && (!taskId || !/^\d+$/.test(taskId))) {
+  console.error("NOT_RUN: --result-resource requires an explicit numeric --task-id.");
+  process.exitCode = 2;
+} else if (!uploadOnly && !taskId && !expiryProbe && !resultResourceProbe && (!workflowId || !/^\d+$/.test(workflowId))) {
   console.error("NOT_RUN: pass an explicit numeric --workflow-id for the ephemeral live probe.");
   process.exitCode = 2;
 } else {
@@ -73,6 +84,8 @@ if (!apiKey || liveCases !== "full") {
       ? runUploadProbe(apiKey)
       : expiryProbe
         ? runExpiryProbe(apiKey, taskId)
+      : resultResourceProbe
+        ? runResultResourceProbe(apiKey, taskId)
       : taskId
       ? recoverProbe(apiKey, taskId, timeoutMs)
         : structuralGraph
@@ -358,6 +371,91 @@ async function recoverProbe(apiKeyValue, providerTaskId, waitTimeoutMs) {
     throw new Error(`recovered task ended with execution_state=${final.execution_state}, artifact_state=${final.artifact_state}`);
   } finally {
     storage.close();
+  }
+}
+
+async function runResultResourceProbe(apiKeyValue, providerTaskId) {
+  const root = mkdtempSync(join(tmpdir(), "runninghub-mcp-live-result-resource-"));
+  mkdirSync(join(root, "outputs"), { recursive: true });
+  const storage = new Storage(":memory:");
+  let server;
+  let client;
+  try {
+    const projectId = "live-result-resource-memory";
+    const projects = new ProjectContextService(storage);
+    projects.registerProject({ project_id: projectId, canonical_root: root, backend_profile_id: "runninghub", output_root: "outputs" });
+    const workItem = projects.createWorkItem({ project_id: projectId, user_request: "authorized read-only result resource probe", request_kind: "capability_test" });
+    const revisions = new RevisionStore({ persistence: new SqliteRevisionPersistence(storage) });
+    const revision = revisions.createWorkflow({ project_id: projectId, workflow_id: `live-result-resource-${providerTaskId}`, graph: createEmptyGraph(), reason: "read_only_result_resource_probe" });
+    const plan = {
+      id: `live-result-resource-plan-${providerTaskId}`,
+      project_id: projectId,
+      work_item_id: workItem.id,
+      graph_revision_id: revision.revision_id,
+      graph_hash: revision.graph_hash,
+      workflow_json: "{}",
+      asset_bindings: [],
+      requirements_hash: "read-only-result-resource-probe",
+      policy_hash: "read-only-result-resource-probe",
+      backend_profile_id: "runninghub",
+      output_contract: {},
+      mode: "capability_test",
+    };
+    storage.saveExecutionPlan(planToRow(plan));
+    const job = storage.reserveJob(projectId, plan.id, `live-result-resource-request-${providerTaskId}`);
+    storage.claimSubmit(job.id, `read-only:${job.id}`);
+    storage.recordProviderTask(job.id, providerTaskId);
+    storage.markProviderStatus(job.id, "SUCCESS", "PENDING");
+
+    const config = {
+      dataDir: root,
+      dbPath: ":memory:",
+      catalogDir: join(process.cwd(), "data", "upstream"),
+      profileId: "runninghub",
+      workflowApi: {
+        profile_id: "runninghub",
+        base_url: "https://www.runninghub.ai",
+        api_key: apiKeyValue,
+        routes: {
+          submit: "/task/openapi/create",
+          status: "/openapi/v2/query",
+          outputs: "/openapi/v2/query",
+          upload: "/openapi/v2/media/upload/binary",
+          cancel: "/task/openapi/cancel",
+        },
+      },
+    };
+    server = createServer(config, storage);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "runninghub-live-result-resource-probe", version: "0.1.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const result = await client.callTool({ name: "rh_get_results", arguments: { job_id: job.id } });
+    if (result.isError) {
+      const errorText = result.content.find((item) => item.type === "text")?.text;
+      let error;
+      try {
+        error = errorText ? JSON.parse(errorText).error : undefined;
+      } catch {
+        error = undefined;
+      }
+      const code = typeof error?.code === "string" ? error.code : "UNKNOWN";
+      const message = typeof error?.message === "string" ? error.message.replace(/https?:\/\/\S+/gi, "[redacted-url]") : "unknown MCP error";
+      throw new Error(`rh_get_results returned MCP error ${code}: ${message}`);
+    }
+    const text = result.content.find((item) => item.type === "text")?.text;
+    const payload = text ? JSON.parse(text) : undefined;
+    const resourceLink = result.content.find((item) => item.type === "resource_link");
+    const resourceUri = resourceLink && "uri" in resourceLink ? resourceLink.uri : undefined;
+    if (payload?.ok !== true || !resourceUri || payload.data?.results?.length !== 1) throw new Error("rh_get_results did not return one result resource link.");
+    const resource = await client.readResource({ uri: resourceUri });
+    const content = resource.contents[0];
+    if (!content || typeof content.blob !== "string" || content.mimeType !== payload.data.results[0].mime) throw new Error("resources/read did not return the downloaded result blob.");
+    console.error(`LIVE_PASS: result_resource=true mime=${content.mimeType} bytes=${Buffer.from(content.blob, "base64").length}`);
+  } finally {
+    if (client) await client.close().catch(() => undefined);
+    if (server) await server.close().catch(() => undefined);
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
   }
 }
 
