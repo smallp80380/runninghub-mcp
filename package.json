@@ -25,7 +25,8 @@
     "test:mcp": "npm run build && node --test tests/mcp/*.test.mjs",
     "test:acceptance:offline": "npm run test:unit && npm run test:contract && npm run test:graph && npm run test:l03 && npm run test:l04 && npm run test:l05 && npm run test:l06 && npm run test:l07 && npm run test:runtime && npm run test:mcp",
     "test:live": "node scripts/test-live.mjs",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "package:runtime": "node scripts/build-runtime-package.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.21.0",

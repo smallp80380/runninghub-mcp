@@ -24,40 +24,16 @@
 - Codex Desktop, Codex CLI или расширение Codex для IDE.
 - FFmpeg в `PATH` для локальных превью изображений и постеров видео. Для поиска и локальной работы с workflow FFmpeg не обязателен; если он не находится в `PATH`, укажите `RUNNINGHUB_FFMPEG_PATH`.
 
-## Установка из GitHub
+## Установка этого runtime-пакета
 
-Этот вариант устанавливает исходный репозиторий. Он удобен, если вы хотите получать обновления и пересобирать сервер после изменений.
-
-### Windows PowerShell
-
-```powershell
-git clone <YOUR-REPOSITORY-URL> runninghub-mcp
-Set-Location .\runninghub-mcp
-npm ci
-npm run build
-```
-
-### macOS или Linux
-
-```bash
-git clone <YOUR-REPOSITORY-URL> runninghub-mcp
-cd runninghub-mcp
-npm ci
-npm run build
-```
-
-`npm ci` устанавливает инструменты разработки, необходимые для компиляции TypeScript. Команда `npm run build` создаёт папку `dist/` — именно собранный JavaScript используется Codex.
-
-## Установка готового пакета
-
-В репозитории может находиться папка `rhcomfy-mcp/`. Она содержит только уже собранный сервер, необходимые файлы каталога и документацию по установке. На другом компьютере выполните:
+Эта папка уже содержит собранный сервер, необходимые файлы публичного каталога и документацию по установке. На другом компьютере распакуйте папку или `rhcomfy-mcp-runtime.zip`, откройте её в PowerShell и выполните:
 
 ```powershell
 Set-Location C:\Path\To\rhcomfy-mcp
-npm ci --omit=dev
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Готовому пакету не нужны `npm run build`, TypeScript, тесты или исходный код. Запуск:
+Скрипт проверит Node.js 22.5.0+, установит только runtime-зависимости через `npm ci --omit=dev` и выполнит локальную проверку файлов, каталога и STDIO MCP-handshake. Если зависимости уже установлены, можно выполнить `npm run verify` напрямую. Готовому пакету не нужны `npm run build`, TypeScript, тесты или исходный код. Запуск:
 
 ```powershell
 npm start
@@ -68,6 +44,8 @@ npm start
 ## Подключение к Codex
 
 Codex подключается к этому серверу как к локальному MCP-серверу STDIO. Формат `config.toml`, параметры `command`, `args`, `cwd`, `env` и настройка через desktop app описаны в [официальной документации Codex MCP](https://developers.openai.com/codex/mcp).
+
+В пакете есть шаблон `codex-mcp.example.toml`: замените в нём путь к папке пакета и placeholder API-ключа, затем перенесите блок в `%USERPROFILE%\.codex\config.toml` или добавьте сервер через настройки Codex Desktop.
 
 ### Вариант A: Codex Desktop
 
@@ -221,6 +199,10 @@ rh подготовь workflow для короткого видео из это�
 | `package.json` | Runtime-зависимости, версия Node.js и команда запуска. |
 | `package-lock.json` | Воспроизводимая установка runtime-зависимостей. |
 | `README.md` | Инструкции по установке и подключению к Codex. |
+| `install.ps1` | Windows-установка зависимостей и проверка пакета. |
+| `verify-install.mjs` | Проверка файлов, каталога и STDIO MCP-handshake без обращения к RunningHub. |
+| `codex-mcp.example.toml` | Безопасный шаблон блока `config.toml` с placeholder вместо ключа. |
+| `package.ps1` | Создание переносимого ZIP без `node_modules`, секретов и локального состояния. |
 
 Файлы `third_party/upstream/LICENSE` и `UPSTREAM.md` не читаются сервером при запуске, но их следует включать при распространении каталога, чтобы сохранить уведомление и информацию о происхождении данных.
 
@@ -233,7 +215,13 @@ rh подготовь workflow для короткого видео из это�
 - `dist/**/*.d.ts` и `dist/**/*.js.map` — декларации типов и source maps, не требующиеся для запуска.
 - Временное состояние: `.tmp/`, SQLite-файлы, сгенерированные медиафайлы, API-ключи и приватные данные проектов.
 
-Отдельная папка `rhcomfy-mcp/` в этом репозитории предназначена именно для такого runtime-пакета, а не для второй копии исходного проекта.
+В этот пакет не входят `node_modules`, API-ключи, SQLite-файлы, сгенерированные медиафайлы, исходники TypeScript, декларации, source maps, тесты и development-документация. Скрипт `package.ps1` создаёт архив только из перечисленных файлов и не добавляет случайные артефакты из рабочей папки.
+
+Чтобы заново создать архив после обновления файлов пакета, выполните:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\package.ps1
+```
 
 ## Команды разработки
 

@@ -1,0 +1,14 @@
+# Merge this block into %USERPROFILE%\.codex\config.toml.
+# Replace the package path and API key before enabling cloud execution.
+# Do not commit the edited file if it contains a real key.
+
+[mcp_servers.runninghub]
+command = "node"
+args = ['C:\Path\To\rhcomfy-mcp\dist\index.js']
+cwd = 'C:\Path\To\rhcomfy-mcp'
+startup_timeout_sec = 20
+tool_timeout_sec = 120
+
+[mcp_servers.runninghub.env]
+RUNNINGHUB_WORKFLOW_API_KEY = "PASTE_YOUR_KEY_HERE"
+RUNNINGHUB_CATALOG_DIR = 'C:\Path\To\rhcomfy-mcp\data\upstream'
