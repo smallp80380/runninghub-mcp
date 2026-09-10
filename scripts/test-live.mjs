@@ -22,6 +22,7 @@ const workflowId = argumentValue("--workflow-id");
 const taskId = argumentValue("--task-id");
 const uploadOnly = process.argv.includes("--upload-only");
 const structuralGraph = process.argv.includes("--structural-graph");
+const newGraphProbe = process.argv.includes("--new-graph");
 const cancelProbe = process.argv.includes("--cancel");
 const expiryProbe = process.argv.includes("--expiry");
 const resultResourceProbe = process.argv.includes("--result-resource");
@@ -44,6 +45,9 @@ if (!apiKey || liveCases !== "full") {
 } else if (uploadOnly && cancelProbe) {
   console.error("NOT_RUN: --upload-only cannot be combined with --cancel.");
   process.exitCode = 2;
+} else if (newGraphProbe && (uploadOnly || structuralGraph || cancelProbe || expiryProbe || resultResourceProbe)) {
+  console.error("NOT_RUN: --new-graph cannot be combined with another probe mode.");
+  process.exitCode = 2;
 } else if ((uploadOnly || structuralGraph || cancelProbe) && expiryProbe) {
   console.error("NOT_RUN: --expiry is read-only and cannot be combined with another probe mode.");
   process.exitCode = 2;
@@ -52,6 +56,9 @@ if (!apiKey || liveCases !== "full") {
   process.exitCode = 2;
 } else if (structuralGraph && cancelProbe) {
   console.error("NOT_RUN: --structural-graph cannot be combined with --cancel.");
+  process.exitCode = 2;
+} else if (newGraphProbe && (!workflowId || !/^\d+$/.test(workflowId))) {
+  console.error("NOT_RUN: --new-graph requires an explicit numeric --workflow-id source workflow.");
   process.exitCode = 2;
 } else if (structuralGraph && taskId) {
   console.error("NOT_RUN: --structural-graph cannot be combined with --task-id.");
@@ -80,7 +87,7 @@ if (!apiKey || liveCases !== "full") {
 } else if (durationSecondsArgument !== undefined && (!Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > 60)) {
   console.error("NOT_RUN: --duration-seconds must be a positive number no greater than 60.");
   process.exitCode = 2;
-} else if (durationSeconds !== undefined && (uploadOnly || structuralGraph || cancelProbe || expiryProbe || resultResourceProbe)) {
+} else if (durationSeconds !== undefined && (uploadOnly || structuralGraph || newGraphProbe || cancelProbe || expiryProbe || resultResourceProbe)) {
   console.error("NOT_RUN: --duration-seconds is supported only for the ephemeral generation probe.");
   process.exitCode = 2;
 } else if (!uploadOnly && !taskId && !expiryProbe && !resultResourceProbe && (!workflowId || !/^\d+$/.test(workflowId))) {
@@ -96,8 +103,10 @@ if (!apiKey || liveCases !== "full") {
         ? runResultResourceProbe(apiKey, taskId)
       : taskId
       ? recoverProbe(apiKey, taskId, timeoutMs)
-        : structuralGraph
-          ? runStructuralGraphProbe(apiKey, workflowId, resizeNodeId, resizeWidth, resizeHeight, timeoutMs)
+            : newGraphProbe
+              ? runNewGraphProbe(apiKey, workflowId, timeoutMs)
+            : structuralGraph
+              ? runStructuralGraphProbe(apiKey, workflowId, resizeNodeId, resizeWidth, resizeHeight, timeoutMs)
           : cancelProbe
             ? runCancelProbe(apiKey, workflowId)
             : runProbe(apiKey, workflowId, timeoutMs, durationSeconds));
@@ -135,9 +144,12 @@ async function runUploadProbe(apiKeyValue) {
       api_key: apiKeyValue,
       routes: {
         submit: "/task/openapi/create",
+        submit_v2: "/openapi/v2/run/workflow",
         status: "/openapi/v2/query",
         outputs: "/openapi/v2/query",
-        upload: "/openapi/v2/media/upload/binary",
+        upload: "/task/openapi/upload",
+        upload_legacy: "/task/openapi/upload",
+        upload_v2: "/openapi/v2/media/upload/binary",
         cancel: "/task/openapi/cancel",
       },
     });
@@ -215,9 +227,12 @@ async function runProbe(apiKeyValue, remoteWorkflowId, waitTimeoutMs, durationSe
       api_key: apiKeyValue,
       routes: {
         submit: "/task/openapi/create",
+        submit_v2: "/openapi/v2/run/workflow",
         status: "/openapi/v2/query",
         outputs: "/openapi/v2/query",
-        upload: "/openapi/v2/media/upload/binary",
+        upload: "/task/openapi/upload",
+        upload_legacy: "/task/openapi/upload",
+        upload_v2: "/openapi/v2/media/upload/binary",
         cancel: "/task/openapi/cancel",
       },
     });
@@ -234,6 +249,7 @@ async function runProbe(apiKeyValue, remoteWorkflowId, waitTimeoutMs, durationSe
       policy_hash: "ephemeral-live-probe",
       backend_profile_id: "runninghub",
       provider_workflow_id: remoteWorkflowId,
+      provider_submit_mode: durationSecondsValue === undefined ? "v2_node_info" : "legacy_graph",
       output_contract: { output_node_ids: revision.graph.output_nodes },
       mode: "capability_test",
     };
@@ -245,6 +261,68 @@ async function runProbe(apiKeyValue, remoteWorkflowId, waitTimeoutMs, durationSe
       throw new Error(`live probe ended with execution_state=${final.execution_state}, artifact_state=${final.artifact_state}`);
     }
     console.error(`LIVE_PASS: task_id=${final.provider_task_id ?? "unknown"} outputs_ready=true`);
+  } finally {
+    storage.close();
+  }
+}
+
+async function runNewGraphProbe(apiKeyValue, remoteWorkflowId, waitTimeoutMs) {
+  const source = await getWorkflowJson(apiKeyValue, remoteWorkflowId);
+  const graph = importApiGraph(source);
+  const storage = new Storage(":memory:");
+  try {
+    const projectId = "live-new-graph-probe-memory";
+    storage.registerProject(projectId, "runninghub");
+    const projects = new ProjectContextService(storage);
+    const workItem = projects.createWorkItem({ project_id: projectId, user_request: "authorized ephemeral new graph probe", request_kind: "capability_test" });
+    const revisions = new RevisionStore({ persistence: new SqliteRevisionPersistence(storage) });
+    const revision = revisions.createWorkflow({
+      project_id: projectId,
+      workflow_id: `live-new-graph-${remoteWorkflowId}-${Date.now()}`,
+      graph,
+      reason: "ephemeral_new_graph_live_probe",
+    });
+    const backend = new WorkflowApiClient({
+      profile_id: "runninghub",
+      base_url: "https://www.runninghub.ai",
+      api_key: apiKeyValue,
+      routes: {
+        submit: "/task/openapi/create",
+        submit_v2: "/openapi/v2/run/workflow",
+        status: "/openapi/v2/query",
+        outputs: "/openapi/v2/query",
+        cancel: "/task/openapi/cancel",
+      },
+    });
+    const runner = new DurableWorkflowRunner(storage, backend);
+    const plan = {
+      id: `live-new-graph-probe-plan-${remoteWorkflowId}-${Date.now()}`,
+      project_id: projectId,
+      work_item_id: workItem.id,
+      graph_revision_id: revision.revision_id,
+      graph_hash: revision.graph_hash,
+      workflow_json: exportApiGraph(graph),
+      asset_bindings: [],
+      requirements_hash: "ephemeral-new-graph-live-probe",
+      policy_hash: "ephemeral-new-graph-live-probe",
+      backend_profile_id: "runninghub",
+      provider_workflow_id: remoteWorkflowId,
+      provider_submit_mode: "legacy_graph",
+      output_contract: { output_node_ids: revision.graph.output_nodes, source_workflow_id: remoteWorkflowId },
+      mode: "capability_test",
+    };
+    const job = await runner.run(plan, `live-new-graph-probe-${remoteWorkflowId}-${Date.now()}`);
+    console.error(`LIVE_FULL_GRAPH_SUBMIT: provider_workflow_id=${remoteWorkflowId} graph_hash=${revision.graph_hash} task_id=${job.provider_task_id ?? "unknown"}`);
+    if (job.execution_state === "SUBMIT_UNKNOWN") {
+      console.error("LIVE_PENDING: submit outcome is unknown; no provider task ID is available, so no automatic retry or polling was attempted.");
+      process.exitCode = 2;
+      return;
+    }
+    const final = await runner.wait(job.id, waitTimeoutMs, 5_000);
+    if (final.execution_state !== "SUCCEEDED" || final.artifact_state !== "READY") {
+      throw new Error(`new graph probe ended with execution_state=${final.execution_state}, artifact_state=${final.artifact_state}`);
+    }
+    console.error(`LIVE_PASS: full_graph_override=true provider_workflow_id=${remoteWorkflowId} output_ready=true`);
   } finally {
     storage.close();
   }
@@ -291,6 +369,7 @@ async function runStructuralGraphProbe(apiKeyValue, remoteWorkflowId, nodeId, wi
       policy_hash: "ephemeral-structural-live-probe",
       backend_profile_id: "runninghub",
       provider_workflow_id: remoteWorkflowId,
+      provider_submit_mode: "legacy_graph",
       output_contract: {
         output_node_ids: revision.graph.output_nodes,
         structural_probe: { node_id: prepared.node_id, width: prepared.after.width, height: prepared.after.height },
@@ -326,6 +405,7 @@ async function runCancelProbe(apiKeyValue, remoteWorkflowId) {
       api_key: apiKeyValue,
       routes: {
         submit: "/task/openapi/create",
+        submit_v2: "/openapi/v2/run/workflow",
         status: "/openapi/v2/query",
         outputs: "/openapi/v2/query",
         cancel: "/task/openapi/cancel",
@@ -473,7 +553,9 @@ async function runResultResourceProbe(apiKeyValue, providerTaskId) {
           submit: "/task/openapi/create",
           status: "/openapi/v2/query",
           outputs: "/openapi/v2/query",
-          upload: "/openapi/v2/media/upload/binary",
+          upload: "/task/openapi/upload",
+          upload_legacy: "/task/openapi/upload",
+          upload_v2: "/openapi/v2/media/upload/binary",
           cancel: "/task/openapi/cancel",
         },
       },

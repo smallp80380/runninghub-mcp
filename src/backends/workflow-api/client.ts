@@ -1,13 +1,17 @@
 import { createHash } from "node:crypto";
-import { parse as parseLossless } from "lossless-json";
+import { isLosslessNumber, parse as parseLossless } from "lossless-json";
 import { AppError } from "../../errors.js";
-import { SubmitUnknownError, type ProviderAssetReference, type ProviderLoraReference, type ProviderLoraUploadInput, type ProviderOutput, type ProviderStatus, type ProviderUploadInput, type WorkflowBackend } from "../../execution/types.js";
+import { SubmitUnknownError, type NodeInfoOverride, type ProviderAssetReference, type ProviderLoraReference, type ProviderLoraUploadInput, type ProviderOutput, type ProviderStatus, type ProviderUploadInput, type WorkflowBackend, type WorkflowSubmitMode } from "../../execution/types.js";
 
 export interface WorkflowApiRoutes {
   readonly submit: string;
+  readonly submit_v2?: string;
+  readonly workflow_json?: string;
   readonly status: string;
   readonly outputs: string;
   readonly upload?: string;
+  readonly upload_legacy?: string;
+  readonly upload_v2?: string;
   readonly lora_upload_url?: string;
   readonly cancel?: string;
 }
@@ -18,7 +22,9 @@ export interface WorkflowApiClientOptions {
   readonly api_key: string;
   readonly routes: WorkflowApiRoutes;
   readonly timeout_ms?: number;
+  readonly signed_upload_hosts?: readonly string[];
   readonly fetch_impl?: typeof fetch;
+  readonly logger?: (event: Record<string, unknown>) => void;
 }
 
 function pathValue(value: unknown, paths: readonly string[]): unknown {
@@ -30,23 +36,59 @@ function pathValue(value: unknown, paths: readonly string[]): unknown {
   return current;
 }
 
-function errorFromBody(body: unknown): string | undefined {
-  for (const path of [["errorMessage"], ["error"], ["message"], ["errorCode"], ["code"], ["data", "errorMessage"], ["data", "message"], ["data", "errorCode"]]) {
-    const value = pathValue(body, path);
-    if (typeof value === "string" && value.trim()) return value;
+function providerMessage(value: unknown, apiKey: string): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  let message = value.trim();
+  try {
+    const parsed = JSON.parse(message) as unknown;
+    if (typeof parsed === "string") {
+      message = parsed;
+    } else if (parsed && typeof parsed === "object") {
+      const nested = pathValue(parsed, ["message"]) ?? pathValue(parsed, ["errorMessage"]) ?? pathValue(parsed, ["error", "message"]);
+      const code = pathValue(parsed, ["code"]) ?? pathValue(parsed, ["errorCode"]);
+      if (typeof nested === "string" && nested.trim()) message = `${typeof code === "string" || typeof code === "number" ? `${String(code)}: ` : ""}${nested.trim()}`;
+      else if (typeof code === "string" || typeof code === "number") message = String(code);
+      else return "Provider rejected the request.";
+    }
+  } catch {
+    // Ordinary provider messages are not JSON envelopes.
   }
+  if (apiKey.trim()) message = message.replaceAll(apiKey, "[REDACTED_API_KEY]");
+  message = message
+    .replace(/https?:\/\/[^\s"']+/gi, "[REDACTED_URL]")
+    .replace(/\b(api[_-]?key|authorization|bearer|access[_-]?token|token|signature|secret)\s*[:=]\s*[^\s,;)}]+/gi, "$1=[REDACTED]");
+  return message.slice(0, 1000);
+}
+
+function errorFromBody(body: unknown, apiKey: string): string | undefined {
   const code = pathValue(body, ["code"]) ?? pathValue(body, ["data", "code"]);
-  const message = pathValue(body, ["msg"]) ?? pathValue(body, ["data", "msg"]);
-  if (typeof message === "string" && message.trim() && code !== undefined && !["0", "200"].includes(String(code))) return message;
+  const successCode = ["0", "200"].includes(String(code));
+  for (const path of [["errorMessage"], ["error", "message"], ["data", "errorMessage"], ["data", "error", "message"]]) {
+    const message = providerMessage(pathValue(body, path), apiKey);
+    if (message) return message;
+  }
+  if (!successCode) {
+    for (const path of [["error"], ["message"], ["data", "message"], ["msg"], ["data", "msg"], ["errorCode"], ["code"], ["data", "errorCode"]]) {
+      const message = providerMessage(pathValue(body, path), apiKey);
+      if (message) return message;
+    }
+  }
   return undefined;
 }
 
 function taskIdFromBody(body: unknown): string | undefined {
   for (const path of [["taskId"], ["task_id"], ["data", "taskId"], ["data", "task_id"]]) {
     const value = pathValue(body, path);
-    if (typeof value === "string" || typeof value === "number" || (value && typeof value === "object" && "toString" in value)) return String(value);
+    const text = typeof value === "string" || typeof value === "number" || isLosslessNumber(value) ? String(value).trim() : "";
+    if (text && text.length <= 256 && /^[A-Za-z0-9._:-]+$/.test(text)) return text;
   }
   return undefined;
+}
+
+function boundedScalar(value: unknown): string | undefined {
+  if (!(typeof value === "string" || typeof value === "number" || isLosslessNumber(value))) return undefined;
+  const text = String(value).trim();
+  return text && text.length <= 256 ? text : undefined;
 }
 
 function normalizeStatus(value: unknown): ProviderStatus["state"] | undefined {
@@ -64,7 +106,87 @@ function textValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function terminalTaskFailure(body: unknown): { code: string; message: string } | undefined {
+function epochExpiry(value: number): string | undefined {
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  const milliseconds = value >= 1_000_000_000_000 ? value : value * 1000;
+  const date = new Date(milliseconds);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
+function absoluteExpiry(value: unknown): string | undefined {
+  if (typeof value === "number") return epochExpiry(value);
+  if (isLosslessNumber(value)) return epochExpiry(Number(value.toString()));
+  const text = textValue(value);
+  if (!text) return undefined;
+  if (/^\d+(?:\.\d+)?$/.test(text)) return epochExpiry(Number(text));
+  const timestamp = Date.parse(text);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
+}
+
+function pathValues(value: unknown, paths: readonly (readonly string[])[]): unknown[] {
+  return paths.map((path) => pathValue(value, path)).filter((candidate) => candidate !== undefined);
+}
+
+function responseExpiry(body: unknown): string | undefined {
+  const absolute = pathValues(body, [
+    ["expiresAt"], ["expires_at"], ["expiration"], ["expireTime"],
+    ["data", "expiresAt"], ["data", "expires_at"], ["data", "expiration"], ["data", "expireTime"],
+  ]).map(absoluteExpiry).find((value): value is string => Boolean(value));
+  if (absolute) return absolute;
+
+  const duration = pathValues(body, [
+    ["expiresIn"], ["expires_in"], ["ttl"],
+    ["data", "expiresIn"], ["data", "expires_in"], ["data", "ttl"],
+  ]).map((value) => typeof value === "number" || typeof value === "string" || isLosslessNumber(value) ? Number(String(value)) : NaN)
+    .find((value) => Number.isFinite(value) && value > 0);
+  return duration === undefined ? undefined : new Date(Date.now() + duration * 1000).toISOString();
+}
+
+function urlExpiry(value: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  for (const key of ["expires", "Expires", "expires_at", "expiresAt", "expiration", "se"]) {
+    const expiry = absoluteExpiry(url.searchParams.get(key));
+    if (expiry) return expiry;
+  }
+  const signedAt = url.searchParams.get("X-Amz-Date") ?? url.searchParams.get("x-amz-date");
+  const signedFor = Number(url.searchParams.get("X-Amz-Expires") ?? url.searchParams.get("x-amz-expires"));
+  if (signedAt && Number.isFinite(signedFor) && signedFor > 0) {
+    const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(signedAt);
+    const timestamp = match ? Date.parse(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`) : NaN;
+    if (Number.isFinite(timestamp)) return new Date(timestamp + signedFor * 1000).toISOString();
+  }
+  return undefined;
+}
+
+function cacheExpiry(body: unknown, reference: string): string | undefined {
+  return responseExpiry(body) ?? urlExpiry(reference);
+}
+
+function fileCacheExpiry(body: unknown): string | undefined {
+  return pathValues(body, [
+    ["fileExpiresAt"], ["file_expires_at"],
+    ["data", "fileExpiresAt"], ["data", "file_expires_at"],
+  ]).map(absoluteExpiry).find((value): value is string => Boolean(value));
+}
+
+function cacheReferenceFailure(body: unknown): boolean {
+  const values = pathValues(body, [
+    ["errorCode"], ["errorMessage"], ["error"], ["message"], ["msg"], ["code"],
+    ["data", "errorCode"], ["data", "errorMessage"], ["data", "message"], ["data", "msg"], ["data", "code"],
+  ]).map(textValue).filter((value): value is string => Boolean(value)).map((value) => value.toUpperCase());
+  return values.some((value) =>
+    /(?:FILE|MEDIA|ASSET|URL|UPLOAD|REFERENCE).*(?:EXPIRED|NOT[ _-]?FOUND|DOES NOT EXIST)/.test(value)
+      || /^(?:EXPIRED|NOT_FOUND|NOTFOUND)$/.test(value)
+      || /(?:FILE_NOT_FOUND|MEDIA_NOT_FOUND|ASSET_NOT_FOUND|URL_NOT_FOUND|REFERENCE_NOT_FOUND)/.test(value),
+  );
+}
+
+function terminalTaskFailure(body: unknown, apiKey: string): { code: string; message: string } | undefined {
   const status = textValue(
     pathValue(body, ["status"])
       ?? pathValue(body, ["taskStatus"])
@@ -75,14 +197,17 @@ function terminalTaskFailure(body: unknown): { code: string; message: string } |
     ?? pathValue(body, ["code"])
     ?? pathValue(body, ["data", "errorCode"])
     ?? pathValue(body, ["data", "code"]);
-  const code = textValue(codeValue === undefined ? undefined : String(codeValue));
-  const message = textValue(
+  const code = boundedScalar(codeValue);
+  const message = providerMessage(
     pathValue(body, ["errorMessage"])
       ?? pathValue(body, ["message"])
       ?? pathValue(body, ["msg"])
       ?? pathValue(body, ["data", "errorMessage"])
+      ?? pathValue(body, ["error", "message"])
+      ?? pathValue(body, ["data", "error", "message"])
       ?? pathValue(body, ["data", "message"])
       ?? pathValue(body, ["data", "msg"]),
+    apiKey,
   );
   const markers = [status, code, message].filter((value): value is string => Boolean(value)).map((value) => value.toUpperCase());
   const terminal = markers.some((value) => ["EXPIRED", "TASK_EXPIRED", "TASK_NOT_FOUND", "NOT_FOUND", "NOTFOUND"].includes(value)
@@ -94,53 +219,226 @@ function terminalTaskFailure(body: unknown): { code: string; message: string } |
   };
 }
 
-function workflowSubmitPath(workflowId: string | undefined, fallback: string): string {
-  return workflowId && /^\d+$/.test(workflowId)
-    ? `/openapi/v2/run/workflow/${encodeURIComponent(workflowId)}`
-    : fallback;
+function appendPath(path: string, value: string): string {
+  return `${path.replace(/\/+$/, "")}/${encodeURIComponent(value)}`;
+}
+
+function isValidationError(message: string): boolean {
+  return /prompt_outputs_failed_validation|invalid image file|validation/i.test(message);
+}
+
+function sanitizeForLog(value: unknown, apiKey: string): unknown {
+  if (typeof value === "string") {
+    return value
+      .replaceAll(apiKey.trim() ? apiKey : "\u0000", "[REDACTED_API_KEY]")
+      .replace(/https?:\/\/[^\s"']+/gi, "[REDACTED_URL]");
+  }
+  if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item, apiKey));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => {
+      const sensitive = /api[-_]?key|authorization|bearer|access[_-]?token|token|signature|secret/i.test(key);
+      return [key, sensitive ? "[REDACTED]" : sanitizeForLog(item, apiKey)];
+    }));
+  }
+  return value;
+}
+
+function providerResponseContext(body: unknown): Record<string, string> {
+  const code = pathValue(body, ["errorCode"])
+    ?? pathValue(body, ["code"])
+    ?? pathValue(body, ["data", "errorCode"])
+    ?? pathValue(body, ["data", "code"]);
+  return {
+    ...(boundedScalar(code) ? { provider_code: boundedScalar(code) as string } : {}),
+  };
+}
+
+async function httpProviderError(response: Response, operation: string, apiKey: string): Promise<AppError> {
+  let body: unknown;
+  try {
+    body = parseLossless(await response.text());
+  } catch {
+    body = undefined;
+  }
+  const outcome = [408, 425, 429].includes(response.status) || response.status >= 500 ? "unknown" : "rejected";
+  return new AppError("PROVIDER_ERROR", errorFromBody(body, apiKey) ?? `${operation} HTTP ${response.status}.`, {
+    recoverable: outcome === "unknown",
+    context: { outcome, http_status: String(response.status), ...providerResponseContext(body) },
+  });
+}
+
+const DEFAULT_SIGNED_UPLOAD_HOSTS = [
+  "runninghub.ai",
+  "runninghub.cn",
+  "xiaoyaoyou.com",
+  "myqcloud.com",
+  "aliyuncs.com",
+  "aliyun.com",
+  "amazonaws.com",
+] as const;
+
+function hostMatches(hostname: string, allowed: readonly string[]): boolean {
+  const normalized = hostname.toLowerCase().replace(/\.$/, "");
+  return allowed.some((candidate) => {
+    const domain = candidate.toLowerCase().replace(/^\.+/, "").replace(/\.$/, "");
+    return normalized === domain || normalized.endsWith(`.${domain}`);
+  });
 }
 
 export class WorkflowApiClient implements WorkflowBackend {
   readonly api_family = "workflow_api" as const;
   readonly profile_id: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly baseUrl: URL;
+  private readonly signedUploadHosts: readonly string[];
 
   constructor(private readonly options: WorkflowApiClientOptions) {
     this.profile_id = options.profile_id;
     this.fetchImpl = options.fetch_impl ?? fetch;
-    if (!options.base_url.startsWith("https://") && !options.base_url.startsWith("http://localhost")) {
+    let baseUrl: URL;
+    try {
+      baseUrl = new URL(options.base_url);
+    } catch {
+      throw new AppError("INVALID_CONFIGURATION", "Workflow API base URL is invalid.", { recoverable: true });
+    }
+    const hostname = baseUrl.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const loopback = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+    if (baseUrl.username || baseUrl.password || (baseUrl.protocol !== "https:" && !(baseUrl.protocol === "http:" && loopback))) {
       throw new AppError("INVALID_CONFIGURATION", "Workflow API base URL must be HTTPS unless it targets localhost.", { recoverable: true });
     }
+    for (const route of Object.values(options.routes)) {
+      if (!route) continue;
+      let resolved: URL;
+      try {
+        resolved = new URL(route, baseUrl);
+      } catch {
+        throw new AppError("INVALID_CONFIGURATION", "Workflow API route is invalid.", { recoverable: true });
+      }
+      if (resolved.origin !== baseUrl.origin) {
+        throw new AppError("INVALID_CONFIGURATION", "Workflow API routes must stay on the configured base URL.", { recoverable: true });
+      }
+    }
+    this.baseUrl = baseUrl;
+    this.signedUploadHosts = options.signed_upload_hosts ?? DEFAULT_SIGNED_UPLOAD_HOSTS;
   }
 
-  async submit(input: { workflow_json: string; plan_id: string; workflow_id?: string }): Promise<{ task_id: string; raw?: unknown }> {
-    let response: Response;
+  async submit(input: {
+    workflow_json: string;
+    plan_id: string;
+    workflow_id?: string;
+    node_info_list?: readonly NodeInfoOverride[];
+    submit_mode?: WorkflowSubmitMode;
+  }): Promise<{ task_id: string; raw?: unknown }> {
+    const nodeInfoList = input.node_info_list ?? [];
+    const mode = input.submit_mode
+      ?? (input.workflow_id && /^\d+$/.test(input.workflow_id)
+        ? "v2_node_info"
+        : input.workflow_json
+          ? "legacy_graph"
+          : "legacy_saved");
+    const payload: Record<string, unknown> = { addMetadata: true };
+    let route = this.options.routes.submit;
+    if (mode === "v2_node_info") {
+      if (!input.workflow_id || !/^\d+$/.test(input.workflow_id)) {
+        throw new AppError("INVALID_CONFIGURATION", "V2 workflow submit requires a numeric provider workflow ID.", { recoverable: false });
+      }
+      if (!this.options.routes.submit_v2) {
+        throw new AppError("CAPABILITY_UNSUPPORTED", "Workflow API V2 submit route is not configured.", { recoverable: true });
+      }
+      route = appendPath(this.options.routes.submit_v2, input.workflow_id);
+      payload.workflowId = input.workflow_id;
+      payload.nodeInfoList = nodeInfoList;
+    } else {
+      if (input.workflow_id) payload.workflowId = input.workflow_id;
+      if (mode === "legacy_graph") payload.workflow = input.workflow_json;
+    }
+    this.log({ operation: "submit", route, plan_id: input.plan_id, workflow_id: input.workflow_id ?? null, submit_mode: mode, node_info_list: nodeInfoList });
+    let body: unknown;
     try {
-      response = await this.request(workflowSubmitPath(input.workflow_id, this.options.routes.submit), { workflow: input.workflow_json, ...(input.workflow_id ? { workflowId: input.workflow_id } : {}) });
+      body = await this.request(route, payload);
     } catch (error) {
       if (error instanceof AppError && error.code === "PROVIDER_ERROR" && error.context.outcome === "unknown") throw new SubmitUnknownError(error.message);
       throw error;
     }
-    const body = await this.body(response);
-    const applicationError = errorFromBody(body);
-    if (applicationError && !taskIdFromBody(body)) throw new AppError("PROVIDER_ERROR", applicationError, { recoverable: false });
+    const applicationError = errorFromBody(body, this.options.api_key);
+    if (applicationError && !taskIdFromBody(body)) {
+      const cacheExpired = cacheReferenceFailure(body);
+      throw new AppError("PROVIDER_ERROR", applicationError, {
+        recoverable: cacheExpired,
+        context: {
+          outcome: cacheExpired ? "cache_expired" : "rejected",
+          charge: "unknown_or_not_started",
+          ...providerResponseContext(body),
+          ...(isValidationError(applicationError) ? { retry: "never" } : {}),
+        },
+      });
+    }
     const taskId = taskIdFromBody(body);
-    if (!taskId) throw new SubmitUnknownError("HTTP submit response did not contain a provider task ID.");
+    if (!taskId) {
+      throw new AppError("PROVIDER_ERROR", "HTTP submit response did not contain a provider task ID.", {
+        recoverable: false,
+        context: { outcome: "rejected", charge: "unknown_or_not_started" },
+      });
+    }
     return { task_id: taskId, raw: body };
   }
 
   async upload(input: ProviderUploadInput): Promise<ProviderAssetReference> {
-    if (!this.options.routes.upload) {
+    const route = this.options.routes.upload_legacy ?? this.options.routes.upload;
+    if (!route) {
       throw new AppError("CAPABILITY_UNSUPPORTED", "Workflow API asset upload route is not configured.", { recoverable: true });
     }
     const form = new FormData();
+    form.append("apiKey", this.options.api_key);
+    form.append("fileType", "input");
     form.append("file", new Blob([input.bytes], { type: input.mime }), input.filename);
-    const response = await this.requestMultipart(this.options.routes.upload, form);
-    const body = await this.body(response);
+    this.log({ operation: "upload", route, upload_mode: "legacy", asset_id: input.asset_id, filename: input.filename, file_type: "input" });
+    const body = await this.requestMultipart(route, form);
+    return this.parseUploadResponse(body);
+  }
+
+  async uploadV2(input: ProviderUploadInput): Promise<ProviderAssetReference> {
+    const route = this.options.routes.upload_v2;
+    if (!route) {
+      throw new AppError("CAPABILITY_UNSUPPORTED", "Workflow API V2 asset upload route is not configured.", { recoverable: true });
+    }
+    const form = new FormData();
+    form.append("file", new Blob([input.bytes], { type: input.mime }), input.filename);
+    this.log({ operation: "upload", route, upload_mode: "v2", asset_id: input.asset_id, filename: input.filename });
+    const body = await this.requestMultipart(route, form);
+    return this.parseUploadResponse(body);
+  }
+
+  async getWorkflowJson(workflowId: string): Promise<string> {
+    const route = this.options.routes.workflow_json;
+    if (!route) {
+      throw new AppError("CAPABILITY_UNSUPPORTED", "Workflow JSON preflight route is not configured.", { recoverable: true });
+    }
+    this.log({ operation: "workflow_json_preflight", route, workflow_id: workflowId });
+    const body = await this.request(route, { workflowId });
+    const applicationError = errorFromBody(body, this.options.api_key);
+    if (applicationError) {
+      throw new AppError("PROVIDER_ERROR", applicationError, { recoverable: false, context: providerResponseContext(body) });
+    }
+    const prompt = pathValue(body, ["data", "prompt"]) ?? pathValue(body, ["prompt"]);
+    if (typeof prompt === "string" && prompt.trim()) return prompt;
+    if (prompt && typeof prompt === "object") return JSON.stringify(prompt);
+    throw new AppError("PROVIDER_ERROR", "Workflow JSON response did not contain data.prompt.", { recoverable: false });
+  }
+
+  private parseUploadResponse(body: unknown): ProviderAssetReference {
+    const applicationError = errorFromBody(body, this.options.api_key);
+    if (applicationError) throw new AppError("PROVIDER_ERROR", applicationError, { recoverable: false, context: providerResponseContext(body) });
     const fileName = pathValue(body, ["data", "fileName"]) ?? pathValue(body, ["data", "filename"]) ?? pathValue(body, ["fileName"]) ?? pathValue(body, ["filename"]);
-    if (typeof fileName === "string" && fileName.trim()) return { kind: "provider_file", value: fileName };
+    if (typeof fileName === "string" && fileName.trim()) {
+      const expiresAt = responseExpiry(body);
+      return { kind: "provider_file", value: fileName, ...(expiresAt ? { expires_at: expiresAt } : {}) };
+    }
     const url = pathValue(body, ["data", "download_url"]) ?? pathValue(body, ["data", "downloadUrl"]) ?? pathValue(body, ["download_url"]) ?? pathValue(body, ["downloadUrl"]);
-    if (typeof url === "string" && url.trim()) return { kind: "provider_url", value: url };
+    if (typeof url === "string" && url.trim()) {
+      const expiresAt = cacheExpiry(body, url);
+      return { kind: "provider_url", value: url, ...(expiresAt ? { expires_at: expiresAt } : {}) };
+    }
     throw new AppError("PROVIDER_ERROR", "Workflow API upload response did not contain a tagged provider file or URL.", { recoverable: true });
   }
 
@@ -150,49 +448,51 @@ export class WorkflowApiClient implements WorkflowBackend {
     }
     const md5Hex = createHash("md5").update(input.bytes).digest("hex");
     const loraName = input.filename.replace(/\.[^/.]+$/, "");
-    const response = await this.request(this.options.routes.lora_upload_url, { loraName, md5Hex });
-    const body = await this.body(response);
-    const applicationError = errorFromBody(body);
-    if (applicationError) throw new AppError("PROVIDER_ERROR", applicationError, { recoverable: false });
+    const body = await this.request(this.options.routes.lora_upload_url, { loraName, md5Hex });
+    const applicationError = errorFromBody(body, this.options.api_key);
+    if (applicationError) throw new AppError("PROVIDER_ERROR", applicationError, { recoverable: false, context: providerResponseContext(body) });
     const fileName = pathValue(body, ["data", "fileName"]) ?? pathValue(body, ["data", "filename"]);
     const uploadUrl = pathValue(body, ["data", "url"]);
     if (typeof fileName !== "string" || !fileName.trim() || typeof uploadUrl !== "string" || !uploadUrl.trim()) {
       throw new AppError("PROVIDER_ERROR", "Workflow API LoRA response did not contain fileName and upload URL.", { recoverable: true });
     }
     await this.putSignedLora(uploadUrl, input.bytes);
-    return { kind: "provider_lora", value: fileName };
+    const expiresAt = fileCacheExpiry(body);
+    return { kind: "provider_lora", value: fileName, ...(expiresAt ? { expires_at: expiresAt } : {}) };
   }
 
   async status(taskId: string): Promise<ProviderStatus> {
-    const response = await this.request(this.options.routes.status, { taskId });
-    const body = await this.body(response);
-    const applicationError = errorFromBody(body);
+    const body = await this.request(this.options.routes.status, { taskId });
+    const applicationError = errorFromBody(body, this.options.api_key);
     const statusValue = pathValue(body, ["status"])
       ?? pathValue(body, ["taskStatus"])
       ?? pathValue(body, ["data", "status"])
       ?? pathValue(body, ["data", "taskStatus"]);
     const state = normalizeStatus(statusValue);
-    const terminalFailure = terminalTaskFailure(body);
+    const terminalFailure = terminalTaskFailure(body, this.options.api_key);
     if (terminalFailure) return { state: "FAILED", task_id: taskId, error_code: terminalFailure.code, error_message: terminalFailure.message, raw: body };
-    if (applicationError && !state) throw new AppError("PROVIDER_ERROR", applicationError, { recoverable: false });
+    if (applicationError && !state) {
+      const providerCode = boundedScalar(pathValue(body, ["errorCode"]) ?? pathValue(body, ["code"]) ?? pathValue(body, ["data", "errorCode"]) ?? pathValue(body, ["data", "code"]));
+      throw new AppError("PROVIDER_ERROR", providerCode ? `${providerCode}: ${applicationError}` : applicationError, { recoverable: false, context: providerResponseContext(body) });
+    }
     if (!state) throw new AppError("PROVIDER_ERROR", "Workflow API response did not contain a recognized status.", { recoverable: true });
-    return { state, task_id: taskId, error_message: errorFromBody(body), raw: body };
+    return { state, task_id: taskId, error_message: errorFromBody(body, this.options.api_key), raw: body };
   }
 
   async outputs(taskId: string): Promise<ProviderOutput> {
-    const response = await this.request(this.options.routes.outputs, { taskId });
-    const body = await this.body(response);
-    const applicationError = errorFromBody(body);
-    if (applicationError) throw new AppError("PROVIDER_ERROR", applicationError, { recoverable: false });
+    const body = await this.request(this.options.routes.outputs, { taskId });
+    const applicationError = errorFromBody(body, this.options.api_key);
+    if (applicationError) throw new AppError("PROVIDER_ERROR", applicationError, { recoverable: false, context: providerResponseContext(body) });
     const data = pathValue(body, ["data"]);
     const values = pathValue(body, ["results"]) ?? pathValue(body, ["data", "results"]) ?? (Array.isArray(data) ? data : data && typeof data === "object" && ("fileUrl" in data || "url" in data) ? [data] : undefined);
     if (!Array.isArray(values)) return { outputs: [], raw: body };
     return {
-      outputs: values.map((value, index) => {
+      outputs: values.flatMap((value, index) => {
         const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
         const url = item.url ?? item.outputUrl ?? item.output_url ?? item.fileUrl;
         const mime = item.mime ?? item.fileType;
-        return { id: String(item.id ?? item.nodeId ?? index), ...(typeof url === "string" ? { url } : {}), ...(typeof mime === "string" ? { mime } : {}) };
+        if (typeof url !== "string" || !url.trim()) return [];
+        return [{ id: boundedScalar(item.id ?? item.nodeId) ?? String(index), url, ...(typeof mime === "string" ? { mime } : {}) }];
       }),
       raw: body,
     };
@@ -200,55 +500,54 @@ export class WorkflowApiClient implements WorkflowBackend {
 
   async cancel(taskId: string): Promise<ProviderStatus> {
     if (!this.options.routes.cancel) throw new AppError("CAPABILITY_UNSUPPORTED", "Workflow API cancel route is not configured.", { recoverable: true });
-    const response = await this.request(this.options.routes.cancel, { taskId });
-    const body = await this.body(response);
+    const body = await this.request(this.options.routes.cancel, { taskId });
     const statusValue = pathValue(body, ["status"])
       ?? pathValue(body, ["taskStatus"])
       ?? pathValue(body, ["data", "status"])
       ?? pathValue(body, ["data", "taskStatus"]);
-    const applicationError = errorFromBody(body);
-    if (applicationError && !normalizeStatus(statusValue)) throw new AppError("PROVIDER_ERROR", applicationError, { recoverable: true });
+    const applicationError = errorFromBody(body, this.options.api_key);
+    if (applicationError && !normalizeStatus(statusValue)) throw new AppError("PROVIDER_ERROR", applicationError, { recoverable: true, context: providerResponseContext(body) });
     const state = normalizeStatus(statusValue) ?? "CANCEL";
     return { state, task_id: taskId, raw: body };
   }
 
-  private async request(path: string, payload: Record<string, unknown>): Promise<Response> {
+  private async request(path: string, payload: Record<string, unknown>): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(1, this.options.timeout_ms ?? 30_000));
     try {
-      const url = new URL(path, this.options.base_url).toString();
-      const response = await this.fetchImpl(url, {
+      const url = new URL(path, this.baseUrl);
+      const response = await this.fetchImpl(url.toString(), {
         method: "POST",
-        headers: { Authorization: `Bearer ${this.options.api_key}`, "Content-Type": "application/json", Accept: "application/json" },
+        headers: { Host: url.host, Authorization: `Bearer ${this.options.api_key}`, "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({ apiKey: this.options.api_key, ...payload }),
         signal: controller.signal,
       });
-      if (!response.ok) throw new AppError("PROVIDER_ERROR", `Workflow API HTTP ${response.status}.`, { recoverable: response.status === 429 || response.status >= 500 });
-      return response;
+      if (!response.ok) throw await httpProviderError(response, "Workflow API request", this.options.api_key);
+      return await this.body(response);
     } catch (error) {
       if (error instanceof AppError) throw error;
-      throw new AppError("PROVIDER_ERROR", error instanceof Error ? error.message : "Workflow API request failed.", { recoverable: true, context: { outcome: "unknown" } });
+      throw new AppError("PROVIDER_ERROR", providerMessage(error instanceof Error ? error.message : undefined, this.options.api_key) ?? "Workflow API request failed.", { recoverable: true, context: { outcome: "unknown" } });
     } finally {
       clearTimeout(timeout);
     }
   }
 
-  private async requestMultipart(path: string, body: FormData): Promise<Response> {
+  private async requestMultipart(path: string, body: FormData): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(1, this.options.timeout_ms ?? 30_000));
     try {
-      const url = new URL(path, this.options.base_url).toString();
-      const response = await this.fetchImpl(url, {
+      const url = new URL(path, this.baseUrl);
+      const response = await this.fetchImpl(url.toString(), {
         method: "POST",
-        headers: { Authorization: `Bearer ${this.options.api_key}`, Accept: "application/json" },
+        headers: { Host: url.host, Authorization: `Bearer ${this.options.api_key}`, Accept: "application/json" },
         body,
         signal: controller.signal,
       });
-      if (!response.ok) throw new AppError("PROVIDER_ERROR", `Workflow API upload HTTP ${response.status}.`, { recoverable: response.status === 429 || response.status >= 500 });
-      return response;
+      if (!response.ok) throw await httpProviderError(response, "Workflow API upload", this.options.api_key);
+      return await this.body(response);
     } catch (error) {
       if (error instanceof AppError) throw error;
-      throw new AppError("PROVIDER_ERROR", error instanceof Error ? error.message : "Workflow API upload failed.", { recoverable: true, context: { outcome: "unknown" } });
+      throw new AppError("PROVIDER_ERROR", providerMessage(error instanceof Error ? error.message : undefined, this.options.api_key) ?? "Workflow API upload failed.", { recoverable: true, context: { outcome: "unknown" } });
     } finally {
       clearTimeout(timeout);
     }
@@ -261,8 +560,8 @@ export class WorkflowApiClient implements WorkflowBackend {
     } catch {
       throw new AppError("PROVIDER_ERROR", "Workflow API returned an invalid LoRA upload URL.", { recoverable: false });
     }
-    if (url.protocol !== "https:") {
-      throw new AppError("PROVIDER_ERROR", "Workflow API LoRA upload URL must use HTTPS.", { recoverable: false });
+    if (url.protocol !== "https:" || url.username || url.password || !hostMatches(url.hostname, this.signedUploadHosts)) {
+      throw new AppError("PROVIDER_ERROR", "Workflow API LoRA upload URL is not an allowed HTTPS storage endpoint.", { recoverable: false });
     }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(1, this.options.timeout_ms ?? 30_000));
@@ -272,11 +571,12 @@ export class WorkflowApiClient implements WorkflowBackend {
         headers: { "Content-Type": "application/octet-stream" },
         body: new Blob([bytes], { type: "application/octet-stream" }),
         signal: controller.signal,
+        redirect: "error",
       });
       if (!response.ok) throw new AppError("PROVIDER_ERROR", `Workflow API LoRA upload HTTP ${response.status}.`, { recoverable: response.status === 429 || response.status >= 500 });
     } catch (error) {
       if (error instanceof AppError) throw error;
-      throw new AppError("PROVIDER_ERROR", error instanceof Error ? error.message : "Workflow API LoRA upload failed.", { recoverable: true, context: { outcome: "unknown" } });
+      throw new AppError("PROVIDER_ERROR", providerMessage(error instanceof Error ? error.message : undefined, this.options.api_key) ?? "Workflow API LoRA upload failed.", { recoverable: true, context: { outcome: "unknown" } });
     } finally {
       clearTimeout(timeout);
     }
@@ -289,5 +589,9 @@ export class WorkflowApiClient implements WorkflowBackend {
     } catch {
       throw new AppError("PROVIDER_ERROR", "Workflow API returned non-JSON content.", { recoverable: false });
     }
+  }
+
+  private log(event: Record<string, unknown>): void {
+    this.options.logger?.(sanitizeForLog(event, this.options.api_key) as Record<string, unknown>);
   }
 }

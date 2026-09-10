@@ -3,12 +3,13 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ResourceLink } from "@modelcontextprotocol/sdk/types.js";
+import type { ImageContent, ResourceLink } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { WorkflowApiClient } from "../backends/workflow-api/client.js";
 import { type AppConfig } from "../config.js";
 import { AssetProvider } from "../execution/assets.js";
 import { isLoraAsset, validateLoraGraphBindings } from "../execution/lora.js";
+import { WORKFLOW_MEDIA_PROFILE } from "../execution/media.js";
 import { DerivedMediaService, type DerivedResult } from "../execution/derivatives.js";
 import { ResultManifestService } from "../execution/manifests.js";
 import { ResultDownloadService } from "../execution/results.js";
@@ -34,6 +35,7 @@ import { importWorkflowSchema, projectToolSchema, sceneToolSchema, workItemToolS
 import { Storage } from "../storage/database.js";
 import { SqliteRevisionPersistence } from "../storage/revisions.js";
 import { loadRunningHubData } from "./upstream/data.js";
+import { SERVER_INSTRUCTIONS } from "./instructions.js";
 import {
   buildExamplePayloadSchema,
   createToolHandlers,
@@ -107,6 +109,26 @@ function resultResourceLink(result: { readonly result_id: string; readonly outpu
     mimeType: result.mime,
     description: "Validated local original output.",
   };
+}
+
+const MAX_INLINE_IMAGE_BYTES = 16 * 1024 * 1024;
+
+function inlineImageContent(
+  storage: Storage,
+  result: { readonly result_id: string; readonly job_id: string; readonly relative_path: string; readonly mime: string; readonly size_bytes: number; readonly content_hash: string },
+): ImageContent | undefined {
+  if (!result.mime.toLowerCase().startsWith("image/") || result.size_bytes > MAX_INLINE_IMAGE_BYTES) return undefined;
+  const resource = readStoredResource(storage, new URL(resultUri(result.result_id)), {
+    id: result.result_id,
+    job_id: result.job_id,
+    relative_path: result.relative_path,
+    mime: result.mime,
+    size_bytes: result.size_bytes,
+    content_hash: result.content_hash,
+  });
+  const content = resource.contents[0];
+  if (!content || !("blob" in content) || typeof content.blob !== "string") return undefined;
+  return { type: "image", data: content.blob, mimeType: result.mime };
 }
 
 function derivedUri(derivedId: string): string {
@@ -235,6 +257,7 @@ function executionPlanForInput(
     readonly workflow_revision_id: string;
     readonly backend_profile_id: string;
     readonly provider_workflow_id?: string;
+    readonly provider_submit_mode?: "v2_node_info" | "legacy_saved" | "legacy_graph";
     readonly asset_bindings: readonly { readonly asset_id: string; readonly content_hash: string; readonly provider_ref?: { readonly kind: "provider_file" | "provider_url"; readonly value: string } }[];
     readonly output_contract: Readonly<Record<string, unknown>>;
     readonly mode: "production" | "capability_test";
@@ -276,12 +299,14 @@ function executionPlanForInput(
     request_kind: workItem.request_kind,
     allowed_outputs: workItem.allowed_outputs,
   };
-  const providerWorkflowId = input.provider_workflow_id ?? (/^\d+$/.test(revision.workflow_id) ? revision.workflow_id : undefined);
+  const providerWorkflowId = input.provider_workflow_id;
   const planSeed = {
     work_item_id: workItem.id,
     workflow_revision_id: revision.revision_id,
     backend_profile_id: input.backend_profile_id,
     ...(providerWorkflowId ? { provider_workflow_id: providerWorkflowId } : {}),
+    ...(input.provider_submit_mode ? { provider_submit_mode: input.provider_submit_mode } : {}),
+    workflow_state: "uninitialized",
     asset_bindings: input.asset_bindings,
     output_contract: input.output_contract,
     mode: input.mode,
@@ -298,6 +323,8 @@ function executionPlanForInput(
     policy_hash: sha256(stableJson({ project_id: project.id, policy_revision: project.policy_revision })),
     backend_profile_id: input.backend_profile_id,
     ...(providerWorkflowId ? { provider_workflow_id: providerWorkflowId } : {}),
+    ...(input.provider_submit_mode ? { provider_submit_mode: input.provider_submit_mode } : {}),
+    workflow_state: "uninitialized",
     output_contract: input.output_contract,
     mode: input.mode,
   };
@@ -328,7 +355,10 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
   const workflowLibrary = new WorkflowLibrary(defaultWorkflowCards);
   const manifest = readCatalogManifest(config.catalogDir);
   const reviewService = new ReviewService(storage, revisions, projects);
-  const server = new McpServer({ name: "runninghub-mcp", version: "0.1.0" });
+  const server = new McpServer(
+    { name: "runninghub-mcp", version: "0.1.0" },
+    { instructions: SERVER_INSTRUCTIONS },
+  );
 
   server.resource(
     "result-output",
@@ -523,6 +553,7 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
               local_reference: { kind: "asset", value: `asset://${asset.id}/default` },
               provider_profile_id: profileId,
               provider_reference_cached: Boolean(cached),
+              cache_expires_at: cached?.expires_at ?? null,
               upload_required: !cached,
             }))],
           };
@@ -635,11 +666,16 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
           if (candidates.length === 0) throw new AppError("SCHEMA_UNKNOWN", `No API-format workflow JSON was found in project ${input.project_id}.`, { recoverable: true, suggestedFix: "Place an exported API-format workflow JSON inside the project or provide an explicit relative_path." });
           if (candidates.length > 1) return { content: [jsonText(okResult({ candidates }, ["Multiple project workflows were found; choose one explicitly or narrow the project workflow folder."]))] };
         }
-        const source = projects.readWorkflowFile(input.project_id, input.relative_path ?? candidates[0]?.relative_path ?? "");
+        const source = projects.readWorkflowFile(input.project_id, input.relative_path ?? candidates[0]?.relative_path ?? "", input.output_nodes ?? []);
         const workflowId = input.workflow_id ?? source.workflow_id_hint ?? `file:${source.relative_path}`;
         let revision;
         try {
-          revision = revisions.createWorkflow({ project_id: input.project_id, workflow_id: workflowId, graph: importApiGraph(source.api_graph), reason: "import_project_workflow" });
+          revision = revisions.createWorkflow({
+            project_id: input.project_id,
+            workflow_id: workflowId,
+            graph: importApiGraph(source.api_graph, input.output_nodes ?? []),
+            reason: "import_project_workflow",
+          });
         } catch (error) {
           if (!(error instanceof AppError) || error.code !== "REVISION_CONFLICT") throw error;
           const current = revisions.getCurrent(workflowId);
@@ -660,6 +696,13 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
     async (input) => {
       try {
         const plan = executionPlanForInput(input, projects, revisions, storage);
+        const preparedRevision = revisions.getRevision(plan.graph_revision_id);
+        if (plan.mode === "production" && preparedRevision.validation.runnable !== "ready") {
+          throw new AppError("INVALID_GRAPH", `Workflow revision ${preparedRevision.revision_id} is not proven runnable for production execution.`, {
+            recoverable: true,
+            suggestedFix: "Resolve the validation report and prepare a new revision before production submission.",
+          });
+        }
         const existing = storage.getExecutionPlan(plan.id);
         if (!existing) storage.saveExecutionPlan(planToRow(plan));
         return {
@@ -698,10 +741,35 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
     jobSchema,
     async (input) => {
       try {
-        const row = storage.getJob(input.job_id);
+        let row = storage.getJob(input.job_id);
         if (!row) throw new AppError("PROJECT_NOT_FOUND", `Job ${input.job_id} was not found.`, { recoverable: true });
         if (input.action === "status") return { content: [jsonText(okResult(jobHandle(row)))] };
+        if (input.provider_task_id && input.action !== "resume") {
+          throw new AppError("INVALID_CONFIGURATION", "provider_task_id is allowed only when resuming a SUBMIT_UNKNOWN job.", { recoverable: true });
+        }
+        if (input.action === "resume" && input.provider_task_id) {
+          if (row.execution_state !== "SUBMIT_UNKNOWN" || row.provider_task_id) {
+            throw new AppError("INVALID_CONFIGURATION", "provider_task_id can only reconcile a SUBMIT_UNKNOWN job without an existing provider task.", { recoverable: true });
+          }
+          if (!storage.attachProviderTask(input.job_id, input.provider_task_id)) {
+            throw new AppError("REQUEST_CONFLICT", `Job ${input.job_id} could not be reconciled with the supplied provider task ID.`, { recoverable: true });
+          }
+          row = storage.getJob(input.job_id);
+          if (!row) throw new AppError("PROJECT_NOT_FOUND", `Job ${input.job_id} disappeared during reconcile.`, { recoverable: false });
+        }
         if (input.action === "cancel" && !row.provider_task_id) {
+          if (row.execution_state === "SUBMIT_UNKNOWN") {
+            throw new AppError("SUBMIT_UNKNOWN", `Job ${input.job_id} has an uncertain provider submit and cannot be cancelled locally.`, {
+              recoverable: true,
+              suggestedFix: "Reconcile the exact provider task ID with rh_job resume, then cancel that provider task explicitly.",
+            });
+          }
+          if (row.execution_state === "SUBMITTING") {
+            storage.markSubmitUnknown(input.job_id);
+            const unknown = storage.getJob(input.job_id);
+            if (!unknown) throw new AppError("PROJECT_NOT_FOUND", `Job ${input.job_id} disappeared.`, { recoverable: false });
+            return { content: [jsonText(okResult(jobHandle(unknown), ["The submit was in flight; it was preserved as SUBMIT_UNKNOWN and not cancelled locally."]))] };
+          }
           storage.cancelLocalJob(input.job_id);
           const cancelled = storage.getJob(input.job_id);
           if (!cancelled) throw new AppError("PROJECT_NOT_FOUND", `Job ${input.job_id} disappeared.`, { recoverable: false });
@@ -735,7 +803,7 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
 
   server.tool(
     "rh_get_results",
-    "Download confirmed provider outputs as validated local original files and create local preview/poster derivatives without submitting another task.",
+    "Download confirmed provider outputs as validated local original files, render supported images inline in the current MCP chat, and create local preview/poster derivatives without submitting another task.",
     getResultsSchema,
     async (input) => {
       try {
@@ -746,17 +814,21 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
            const backend = configuredWorkflowBackend(config, planRow.backend_profile_id);
             const results = await new ResultDownloadService(storage, backend).download(input.job_id);
             const derived = await new DerivedMediaService(storage).derive(results.map((result) => result.result_id));
-            const manifest = new ResultManifestService(storage).create(input.job_id, backend.api_family);
-             const review = reviewService.getJobSummary(input.job_id);
-            const originalLinks = results.map(resultResourceLink);
-            const derivedLinks = derived.results.map(derivedResourceLink);
+             const manifest = new ResultManifestService(storage).create(input.job_id, backend.api_family);
+              const review = reviewService.getJobSummary(input.job_id);
+             const originalLinks = results.map(resultResourceLink);
+             const inlineImages = results.flatMap((result) => {
+               const image = inlineImageContent(storage, result);
+               return image ? [image] : [];
+             });
+             const derivedLinks = derived.results.map(derivedResourceLink);
             const enrichedResults = results.map((result, index) => ({
               ...result,
               resource_uri: originalLinks[index]?.uri,
               review: review.results.find((item) => item.result_id === result.result_id),
               derived: derived.results.filter((item) => item.result_id === result.result_id).map((item) => ({ ...item, resource_uri: derivedUri(item.derived_id) })),
             }));
-            return { content: [jsonText(okResult({ job_id: input.job_id, results: enrichedResults, manifest, review }, [...derived.warnings])), ...originalLinks, ...derivedLinks] };
+             return { content: [jsonText(okResult({ job_id: input.job_id, results: enrichedResults, manifest, review }, [...derived.warnings])), ...inlineImages, ...originalLinks, ...derivedLinks] };
        } catch (error) {
          return { isError: true, content: [jsonText(errorResult(error))] };
        }
@@ -851,8 +923,14 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
                 server: { name: "runninghub-mcp", version: "0.1.0" },
                 profile_id: input.profile ?? config.profileId,
                 backend,
-                status: "unknown",
-                reason: "No live profile probe has been run; source/catalog evidence does not prove account access.",
+                status: config.workflowApi ? "configured_not_verified" : "unknown",
+                reason: config.workflowApi
+                  ? "The API key and live-case configuration are present; account access still requires an explicit live probe."
+                  : "No Workflow API key is configured; source/catalog evidence does not prove account access.",
+                configuration: {
+                  api_key_configured: Boolean(config.workflowApi?.api_key),
+                  live_cases_configured: config.live_cases_configured,
+                },
                 graph_execution: { status: "unknown", full_graph_submit: "not_verified" },
                 local: { sqlite: storage.health(), catalog_revision: manifest.revision ?? "unknown" },
                 catalog: {
@@ -861,13 +939,14 @@ export function createServer(config: AppConfig, storage: Storage): McpServer {
                   model_count: data.registry.model_count,
                   pricing_count: data.pricing.pricing_count,
                 },
-                execution: {
-                  prepare: "local",
-                  submit: config.workflowApi ? "configured_not_verified" : "capability_unknown",
-                  polling: config.workflowApi ? "configured_not_verified" : "capability_unknown",
-                  upload: config.workflowApi?.routes.upload ? "configured_not_verified" : "capability_unknown",
-                },
-                    supported_now: ["catalog_read", "payload_validation", "price_estimation", "local_graph_editing", "local_revisions", "api_graph_export", "project_context", "scene_resolution", "asset_hash_index", "asset_inspection", "asset_prepare", "workflow_library_search", "execution_plan_prepare", "job_status", "result_download", "result_resource_links", "result_preview", "result_poster", "result_manifest", "result_manifest_outbox", "result_review", "changes_requested_revision", "review_chain_gate", "approval_continuation"],
+                 execution: {
+                   prepare: "local",
+                   submit: config.workflowApi ? "configured_not_verified" : "capability_unknown",
+                   polling: config.workflowApi ? "configured_not_verified" : "capability_unknown",
+                   upload: (config.workflowApi?.routes.upload_legacy ?? config.workflowApi?.routes.upload) ? "configured_not_verified" : "capability_unknown",
+                 },
+                 media_profile: { ...WORKFLOW_MEDIA_PROFILE, status: "local" },
+                 supported_now: ["catalog_read", "payload_validation", "price_estimation", "local_graph_editing", "local_revisions", "api_graph_export", "project_context", "scene_resolution", "asset_hash_index", "asset_inspection", "asset_prepare", "media_profile_validation", "workflow_library_search", "execution_plan_prepare", "job_status", "result_download", "result_resource_links", "result_preview", "result_poster", "result_manifest", "result_manifest_outbox", "result_review", "changes_requested_revision", "review_chain_gate", "approval_continuation"],
                   not_yet_implemented: ["automatic_approval"],
               }),
             ),

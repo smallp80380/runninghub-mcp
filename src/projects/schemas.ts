@@ -47,4 +47,5 @@ export const importWorkflowSchema = {
   project_id: z.string().min(1),
   relative_path: z.string().min(1).optional(),
   workflow_id: z.string().min(1).optional(),
+  output_nodes: z.array(z.string().min(1)).optional(),
 };

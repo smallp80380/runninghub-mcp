@@ -67,6 +67,8 @@ test("stdio MCP initialize, catalog, graph, and local execution tools work", asy
     const initialized = await nextMessage();
     assert.equal(initialized.id, 1);
     assert.equal(initialized.result.serverInfo.name, "runninghub-mcp");
+    assert.match(initialized.result.instructions, /rh_prepare_generation/);
+    assert.match(initialized.result.instructions, /bare APPROVED review never starts another generation/i);
 
     child.stdin.write(frame({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }));
     child.stdin.write(frame({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }));
@@ -96,8 +98,12 @@ test("stdio MCP initialize, catalog, graph, and local execution tools work", asy
         "rh_job",
         "rh_get_results",
         "rh_review_result",
-        "rh_get_capabilities",
-    ]);
+       "rh_get_capabilities",
+     ]);
+    const jobTool = listed.result.tools.find((tool) => tool.name === "rh_job");
+    assert.equal(jobTool.inputSchema.properties.provider_task_id.type, "string");
+    const importTool = listed.result.tools.find((tool) => tool.name === "rh_import_workflow");
+    assert.equal(importTool.inputSchema.properties.output_nodes.type, "array");
 
     child.stdin.write(frame({
       jsonrpc: "2.0",
@@ -199,6 +205,28 @@ test("stdio MCP initialize, catalog, graph, and local execution tools work", asy
     assert.equal(preparedPayload.ok, true);
     assert.equal(preparedPayload.data.graph_revision_id, editedPayload.data.revision.revision_id);
     assert.equal(preparedPayload.data.backend_profile_id, "offline-profile");
+
+    child.stdin.write(frame({
+      jsonrpc: "2.0",
+      id: 12,
+      method: "tools/call",
+      params: {
+        name: "rh_prepare_generation",
+        arguments: {
+          work_item_id: workItemPayload.data.id,
+          workflow_revision_id: editedPayload.data.revision.revision_id,
+          backend_profile_id: "offline-profile",
+          output_contract: { output_node_ids: [] },
+          mode: "production",
+        },
+      },
+    }));
+    const productionRejected = await nextMessage();
+    assert.equal(productionRejected.id, 12);
+    assert.equal(productionRejected.result.isError, true);
+    const productionFailurePayload = JSON.parse(productionRejected.result.content[0].text);
+    assert.equal(productionFailurePayload.ok, false);
+    assert.equal(productionFailurePayload.error.code, "INVALID_GRAPH");
 
     child.stdin.write(frame({
       jsonrpc: "2.0",

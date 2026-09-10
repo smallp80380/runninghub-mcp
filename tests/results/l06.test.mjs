@@ -11,6 +11,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../../dist/mcp/server.js";
 import { DerivedMediaService } from "../../dist/execution/derivatives.js";
 import { ResultDownloadService } from "../../dist/execution/results.js";
+import { ReviewService } from "../../dist/execution/reviews.js";
 import { planToRow } from "../../dist/execution/runner.js";
 import { RevisionStore } from "../../dist/graph/revisions.js";
 import { createEmptyGraph } from "../../dist/graph/types.js";
@@ -182,6 +183,59 @@ test("creates a video poster from the first frame without another provider opera
   }
 });
 
+test("rejects private output URLs before fetching and refuses redirects", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runninghub-mcp-results-ssrf-"));
+  const backend = new BytesBackend();
+  let fetchCalls = 0;
+  try {
+    const { storage, job } = createProjectJob(root);
+    backend.output = { id: "private-output", url: "https://127.0.0.1/private.png", mime: "image/png" };
+    await assert.rejects(
+      () => new ResultDownloadService(storage, backend, { fetch_impl: async () => { fetchCalls += 1; return new Response(validPng); } }).download(job.id),
+      /disallowed download URL scheme or host/,
+    );
+    assert.equal(fetchCalls, 0);
+    backend.output = { id: "redirect-output", url: "https://cdn.example/redirect.png", mime: "image/png" };
+    await assert.rejects(
+      () => new ResultDownloadService(storage, backend, { fetch_impl: async () => new Response(null, { status: 302, headers: { location: "https://127.0.0.1/private.png" } }) }).download(job.id),
+      /returned HTTP 302/,
+    );
+    storage.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("does not add revision side effects when an existing review retry omits its original revision request", () => {
+  const root = mkdtempSync(join(tmpdir(), "runninghub-mcp-review-idempotency-"));
+  try {
+    const { storage, projects, job } = createProjectJob(root);
+    storage.saveResult({
+      id: "review-result",
+      job_id: job.id,
+      output_id: "output-1",
+      schema_version: "1",
+      relative_path: "outputs/result.png",
+      mime: "image/png",
+      size_bytes: 1,
+      content_hash: "a".repeat(64),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    const reviews = new ReviewService(storage, new RevisionStore({ persistence: new SqliteRevisionPersistence(storage) }), projects);
+    const event = { result_id: "review-result", decision: "CHANGES_REQUESTED", feedback: "Please revise.", review_event_id: "review-idempotency-event" };
+    reviews.review(event);
+    assert.throws(
+      () => reviews.review({ ...event, revision_request: { reason: "Apply the feedback", operations: [{ op: "add_node", node_id: "new-node", class_type: "Source", schema_revision: "1" }] } }),
+      (error) => error?.code === "REQUEST_CONFLICT",
+    );
+    assert.equal(storage.getReviewRevision("review-idempotency-event"), undefined);
+    storage.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rh_get_results downloads through the MCP transport without submitting a task", async () => {
   const root = mkdtempSync(join(tmpdir(), "runninghub-mcp-results-mcp-"));
   const httpRequests = { submit: 0, output: 0, media: 0 };
@@ -235,6 +289,10 @@ test("rh_get_results downloads through the MCP transport without submitting a ta
     assert.equal(payload.data.results.length, 1);
     assert.equal(payload.data.results[0].mime, "image/png");
     assert.match(payload.data.results[0].resource_uri, /^runninghub:\/\/result\//);
+    const inlineImage = result.content.find((item) => item.type === "image");
+    assert.ok(inlineImage);
+    assert.equal(inlineImage.mimeType, "image/png");
+    assert.deepEqual(Buffer.from(inlineImage.data, "base64"), Buffer.from(validPng));
     assert.equal(payload.data.manifest.manifest_id, job.id);
     assert.match(payload.data.manifest.relative_path, /^\.runninghub\/runs\/[^/]+\/manifest\.json$/);
     assert.equal(payload.data.manifest.outbox_id, `result-manifest:${job.id}`);

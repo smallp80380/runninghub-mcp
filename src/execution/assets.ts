@@ -17,16 +17,24 @@ function isInside(root: string, candidate: string): boolean {
   return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.includes(`${sep}..${sep}`);
 }
 
-function providerReference(row: { readonly provider_kind: string; readonly provider_value: string }): ProviderAssetReference {
+function providerReference(row: { readonly provider_kind: string; readonly provider_value: string; readonly expires_at?: string | null }): ProviderAssetReference {
   if ((row.provider_kind === "provider_file" || row.provider_kind === "provider_url") && row.provider_value.trim()) {
-    return { kind: row.provider_kind, value: row.provider_value };
+    return {
+      kind: row.provider_kind,
+      value: row.provider_value,
+      ...(row.expires_at ? { expires_at: row.expires_at } : {}),
+    };
   }
   throw new AppError("PROVIDER_ERROR", "Cached provider upload has an invalid tagged reference.", { recoverable: true });
 }
 
-function providerLoraReference(row: { readonly provider_kind: string; readonly provider_value: string }): ProviderLoraReference {
+function providerLoraReference(row: { readonly provider_kind: string; readonly provider_value: string; readonly expires_at?: string | null }): ProviderLoraReference {
   if (row.provider_kind === "provider_lora" && row.provider_value.trim()) {
-    return { kind: "provider_lora", value: row.provider_value };
+    return {
+      kind: "provider_lora",
+      value: row.provider_value,
+      ...(row.expires_at ? { expires_at: row.expires_at } : {}),
+    };
   }
   throw new AppError("PROVIDER_ERROR", "Cached provider LoRA upload has an invalid tagged reference.", { recoverable: true });
 }
@@ -107,6 +115,7 @@ export class AssetProvider {
       mime: local.row.mime,
       provider_kind: uploaded.kind,
       provider_value: uploaded.value,
+      expires_at: uploaded.expires_at ?? null,
       created_at: now,
       updated_at: now,
     });
@@ -150,6 +159,7 @@ export class AssetProvider {
       content_hash: input.content_hash,
       provider_kind: uploaded.kind,
       provider_value: uploaded.value,
+      expires_at: uploaded.expires_at ?? null,
       created_at: now,
       updated_at: now,
     });

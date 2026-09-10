@@ -10,16 +10,22 @@ test("Workflow API uses built-in official routes and only reads the API key", ()
     RUNNINGHUB_WORKFLOW_API_SUBMIT_PATH: "/must-be-ignored",
     RUNNINGHUB_WORKFLOW_API_STATUS_PATH: "/must-be-ignored",
     RUNNINGHUB_WORKFLOW_API_OUTPUTS_PATH: "/must-be-ignored",
+    RUNNINGHUB_LIVE_CASES: "full",
   });
 
   assert.equal(config.profileId, "runninghub");
   assert.equal(config.workflowApi?.profile_id, "runninghub");
   assert.equal(config.workflowApi?.base_url, "https://www.runninghub.ai");
+  assert.equal(config.live_cases_configured, true);
   assert.deepEqual(config.workflowApi?.routes, {
     submit: "/task/openapi/create",
+    submit_v2: "/openapi/v2/run/workflow",
+    workflow_json: "/api/openapi/getJsonApiFormat",
     status: "/openapi/v2/query",
     outputs: "/openapi/v2/query",
-    upload: "/openapi/v2/media/upload/binary",
+    upload: "/task/openapi/upload",
+    upload_legacy: "/task/openapi/upload",
+    upload_v2: "/openapi/v2/media/upload/binary",
     lora_upload_url: "/api/openapi/getLoraUploadUrl",
     cancel: "/task/openapi/cancel",
   });

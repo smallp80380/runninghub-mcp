@@ -6,12 +6,14 @@ export const prepareGenerationSchema = {
   workflow_revision_id: z.string().min(1),
   backend_profile_id: z.string().min(1),
   provider_workflow_id: z.string().min(1).optional(),
+  provider_submit_mode: z.enum(["v2_node_info", "legacy_saved", "legacy_graph"]).optional(),
   asset_bindings: z.array(z.object({
     asset_id: z.string().min(1),
     content_hash: z.string().regex(/^[a-f0-9]{64}$/i),
     provider_ref: z.object({
       kind: z.enum(["provider_file", "provider_url"]),
       value: z.string().min(1),
+      expires_at: z.string().datetime().optional(),
     }).strict().optional(),
   }).strict()).default([]),
   output_contract: z.record(z.unknown()),
@@ -26,6 +28,7 @@ export const runWorkflowSchema = {
 export const jobSchema = {
   action: z.enum(["status", "wait", "resume", "cancel"]),
   job_id: z.string().min(1),
+  provider_task_id: z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   timeout_ms: z.number().int().min(0).max(60_000).optional(),
 };
 

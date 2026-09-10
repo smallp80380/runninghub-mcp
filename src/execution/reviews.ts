@@ -145,6 +145,9 @@ export class ReviewService {
     if (!sameEvent(stored.row, event)) {
       throw new AppError("REQUEST_CONFLICT", `Review result ${result.id} already has a different review event.`, { recoverable: false, suggestedFix: "Use the original review event ID for an idempotent retry, or review a new result version." });
     }
+    if (!stored.inserted && input.revision_request && !this.storage.getReviewRevision(stored.row.id)) {
+      throw new AppError("REQUEST_CONFLICT", `Review event ${stored.row.id} already exists without the requested revision details.`, { recoverable: false, suggestedFix: "Retry with the original review payload, or submit a new review event ID with the complete revision request." });
+    }
     const review = eventState(stored.row);
     const changesRequestedRevision = input.revision_request
       ? this.createChangesRequestedRevision(stored.row, result, input.revision_request)

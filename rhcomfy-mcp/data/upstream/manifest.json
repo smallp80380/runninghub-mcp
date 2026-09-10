@@ -1,0 +1,95 @@
+{
+  "schema_version": "1.0",
+  "origin": "recorded",
+  "repository": "https://github.com/HM-RunningHub/ComfyUI_RH_OpenAPI.git",
+  "revision": "6dc03fd9655bb8729a561c5f5a1f73c4b285081d",
+  "revision_date": "2026-09-01T02:02:44+08:00",
+  "profile": "public-upstream-source",
+  "captured_at": "2026-09-07",
+  "sanitized_fields": [],
+  "files": [
+    {
+      "source_path": "LICENSE",
+      "local_path": "third_party/upstream/LICENSE",
+      "size_bytes": 642,
+      "sha256": "898536896b00030aa18b4698b568ad4f8eb328a31741cb11a2cff331d228c731"
+    },
+    {
+      "source_path": "developer-kit/mcp-server/src/data.ts",
+      "local_path": "src/mcp/upstream/data.ts",
+      "size_bytes": 1745,
+      "sha256": "9af182fd9b2cd933ec1bdc3d36ebfedb013afa4721a1f6c5031d6abc40128d64"
+    },
+    {
+      "source_path": "developer-kit/mcp-server/src/examplePayload.ts",
+      "local_path": "src/mcp/upstream/examplePayload.ts",
+      "size_bytes": 3228,
+      "sha256": "909c8b017e36c54c7411f678189624374e47a7b315fe85ac241509602741cff4"
+    },
+    {
+      "source_path": "developer-kit/mcp-server/src/integrationGuide.ts",
+      "local_path": "src/mcp/upstream/integrationGuide.ts",
+      "size_bytes": 2865,
+      "sha256": "f7494915a9c005c1233883674b0bd5660c8d1787c2db06bd07d4c828812c351f"
+    },
+    {
+      "source_path": "developer-kit/mcp-server/src/pricing.ts",
+      "local_path": "src/mcp/upstream/pricing.ts",
+      "size_bytes": 2943,
+      "sha256": "b72fc8284fd0b8b51dca3e35f3989043c181a2dd2e7eecb8a10b178f43510923"
+    },
+    {
+      "source_path": "developer-kit/mcp-server/src/search.ts",
+      "local_path": "src/mcp/upstream/search.ts",
+      "size_bytes": 3480,
+      "sha256": "ff2d14c6e1205820711d3072cda88a60e56645e1eb219515cd2bcbc83da70b56"
+    },
+    {
+      "source_path": "developer-kit/mcp-server/src/tools.ts",
+      "local_path": "src/mcp/upstream/tools.ts",
+      "size_bytes": 2694,
+      "sha256": "191b1fc9c0970a7f3a019f733b430cadedda27c8e76c7a447b35599462efefec"
+    },
+    {
+      "source_path": "developer-kit/mcp-server/src/types.ts",
+      "local_path": "src/mcp/upstream/types.ts",
+      "size_bytes": 2205,
+      "sha256": "538c48bd12820f14ac4d6101fc9c2763a5badf2099b2d8f042eeb0ceee29ab2a"
+    },
+    {
+      "source_path": "developer-kit/mcp-server/src/validation.ts",
+      "local_path": "src/mcp/upstream/validation.ts",
+      "size_bytes": 3280,
+      "sha256": "a91b2d94aec61770e20a90fcb3688fac4e5e7b3bd0ff5ba225bc0f73a53cca71"
+    },
+    {
+      "source_path": "developer-kit/model-registry.public.json",
+      "local_path": "data/upstream/model-registry.public.json",
+      "size_bytes": 1353913,
+      "sha256": "628ad07fa7bf873fa80229aee7b1cb5b61605a267e176aeb41e75944ed440796"
+    },
+    {
+      "source_path": "developer-kit/pricing.public.json",
+      "local_path": "data/upstream/pricing.public.json",
+      "size_bytes": 302938,
+      "sha256": "7321a50fb8e3fc2aabda7fc80bda7fecda4bc3fcfee2d50c8ecb35d73a5eb3ac"
+    },
+    {
+      "source_path": "developer-kit/rh-api-contract.md",
+      "local_path": "data/upstream/rh-api-contract.md",
+      "size_bytes": 5190,
+      "sha256": "0d1c79703fe75489fe983f9ac17ac4c5a7e661d5e4ae6d7c6f734fad3c1d3b17"
+    },
+    {
+      "source_path": "developer-kit/llms.txt",
+      "local_path": "data/upstream/llms.txt",
+      "size_bytes": 4448,
+      "sha256": "c6cb07223014c607a4e314b1765428908c585e7de3521d221e89da66b8886c77"
+    }
+  ],
+  "notes": [
+    "Recorded from a public pinned Git checkout; not a RunningHub API response.",
+    "No user credentials, private payloads, or signed URLs are included.",
+    "The upstream test file was audited but not imported as product acceptance evidence."
+  ]
+}

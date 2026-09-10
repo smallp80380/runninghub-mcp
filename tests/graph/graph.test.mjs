@@ -44,6 +44,12 @@ test("API codec preserves a large seed and distinguishes literal arrays from lin
   assert.equal(importApiGraph(exported, ["1"]).nodes["1"].inputs.seed.decimal, "9007199254740993");
 });
 
+test("API graph import retains explicit output nodes for runnable revisions", () => {
+  const graph = importApiGraph('{"9":{"class_type":"SaveImage","inputs":{}}}', ["9", "13"]);
+  assert.deepEqual(graph.output_nodes, ["9", "13"]);
+  assert.equal(importApiGraph(exportApiGraph(graph), ["9", "13"]).output_nodes.length, 2);
+});
+
 test("API codec preserves unsafe numeric literals nested inside an input object", () => {
   const graph = importApiGraph('{"1":{"class_type":"Transform","inputs":{"options":{"megapixels":9007199254740993}}}}');
   const exported = exportApiGraph(graph);

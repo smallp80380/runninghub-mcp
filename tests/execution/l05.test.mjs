@@ -11,6 +11,7 @@ import { RevisionStore } from "../../dist/graph/revisions.js";
 import { SqliteRevisionPersistence } from "../../dist/storage/revisions.js";
 import { ProjectContextService } from "../../dist/projects/context.js";
 import { Storage } from "../../dist/storage/database.js";
+import { AppError } from "../../dist/errors.js";
 
 class FakeBackend {
   profile_id = "fake-profile";
@@ -30,6 +31,8 @@ class FakeBackend {
     this.submit_calls += 1;
     this.submitted_workflows.push(arguments[0].workflow_json);
     if (this.mode === "unknown") throw new SubmitUnknownError("fake timeout after POST");
+    if (this.mode === "rejected") throw new AppError("PROVIDER_ERROR", "fake workflow rejection", { recoverable: false, context: { outcome: "rejected" } });
+    if (this.mode === "missing-task") throw new AppError("PROVIDER_ERROR", "HTTP submit response did not contain a provider task ID.", { recoverable: false, context: { outcome: "rejected", charge: "unknown_or_not_started" } });
     const taskId = `fake-task-${this.submit_calls}`;
     this.statuses.set(taskId, this.mode === "failed" ? "FAILED" : "SUCCESS");
     return { task_id: taskId };
@@ -169,6 +172,108 @@ test("lost submit response becomes SUBMIT_UNKNOWN and is never retried blindly",
   }
 });
 
+test("deterministic provider submit rejection is failed with its original error", async () => {
+  const h = createHarness();
+  h.backend.mode = "rejected";
+  try {
+    await assert.rejects(
+      () => h.runner.run(h.plan, "request-rejected"),
+      (error) => error?.code === "PROVIDER_ERROR" && error.message === "fake workflow rejection",
+    );
+    const job = h.storage.getJobByPlan(h.plan.id);
+    assert.equal(job.execution_state, "FAILED");
+    assert.equal(job.provider_state, "FAILED");
+    assert.equal(h.backend.submit_calls, 1);
+  } finally {
+    h.storage.close();
+  }
+});
+
+test("missing provider task ID is durably failed without a retry", async () => {
+  const h = createHarness();
+  h.backend.mode = "missing-task";
+  try {
+    await assert.rejects(() => h.runner.run(h.plan, "request-missing-task"), /did not contain a provider task ID/);
+    const job = h.storage.getJobByPlan(h.plan.id);
+    assert.equal(job.provider_task_id, null);
+    assert.equal(job.execution_state, "FAILED");
+    assert.equal(job.charge_status, "unknown_or_not_started");
+    assert.equal(h.backend.submit_calls, 1);
+    const repeated = await h.runner.run(h.plan, "request-missing-task-2");
+    assert.equal(repeated.execution_state, "FAILED");
+    assert.equal(h.backend.submit_calls, 1);
+  } finally {
+    h.storage.close();
+  }
+});
+
+test("unknown provider submit returns a durable handle without ending the session", async () => {
+  const h = createHarness();
+  h.backend.submit = async (...args) => {
+    h.backend.submit_calls += 1;
+    h.backend.submitted_workflows.push(args[0].workflow_json);
+    throw new Error("socket closed after submit");
+  };
+  try {
+    const job = await h.runner.run(h.plan, "request-generic-unknown");
+    assert.equal(job.execution_state, "SUBMIT_UNKNOWN");
+    assert.equal(job.provider_task_id, undefined);
+    assert.equal(h.backend.submit_calls, 1);
+    const repeated = await h.runner.run(h.plan, "request-generic-unknown");
+    assert.equal(repeated.execution_state, "SUBMIT_UNKNOWN");
+    assert.equal(h.backend.submit_calls, 1);
+  } finally {
+    h.storage.close();
+  }
+});
+
+test("uncertain submits are not released by local cancellation", async () => {
+  const unknown = createHarness();
+  unknown.backend.mode = "unknown";
+  try {
+    const job = await unknown.runner.run(unknown.plan, "request-unknown-cancel");
+    await assert.rejects(
+      () => unknown.runner.cancel(job.id),
+      (error) => error?.code === "SUBMIT_UNKNOWN",
+    );
+    assert.equal(unknown.storage.getJob(job.id).execution_state, "SUBMIT_UNKNOWN");
+  } finally {
+    unknown.storage.close();
+  }
+
+  const inFlight = createHarness();
+  try {
+    inFlight.runner.prepare(inFlight.plan);
+    const reserved = inFlight.storage.reserveJob(inFlight.plan.project_id, inFlight.plan.id, "request-in-flight-cancel");
+    assert.equal(inFlight.storage.claimSubmit(reserved.id, `submit:${reserved.id}`), true);
+    const preserved = await inFlight.runner.cancel(reserved.id);
+    assert.equal(preserved.execution_state, "SUBMIT_UNKNOWN");
+  } finally {
+    inFlight.storage.close();
+  }
+});
+
+test("a supplied provider task ID reconciles SUBMIT_UNKNOWN without another submit", async () => {
+  const h = createHarness();
+  h.backend.mode = "unknown";
+  try {
+    const unknown = await h.runner.run(h.plan, "request-reconcile");
+    assert.equal(unknown.execution_state, "SUBMIT_UNKNOWN");
+    assert.equal(h.storage.attachProviderTask(unknown.id, "late-task-1"), true);
+    h.backend.statuses.set("late-task-1", "SUCCESS");
+    const reconciled = await h.runner.recover(unknown.id, 100);
+    assert.equal(reconciled.execution_state, "SUCCEEDED");
+    assert.equal(reconciled.provider_task_id, "late-task-1");
+    assert.equal(reconciled.artifact_state, "READY");
+    assert.equal(h.backend.submit_calls, 1);
+    assert.equal(h.backend.status_calls, 1);
+    assert.equal(h.backend.output_calls, 1);
+    assert.equal(h.storage.attachProviderTask(unknown.id, "late-task-2"), false);
+  } finally {
+    h.storage.close();
+  }
+});
+
 test("crash after submit intent recovers as SUBMIT_UNKNOWN without a provider submit", async () => {
   const h = createHarness();
   try {
@@ -274,6 +379,20 @@ test("successful status polls outputs without another submit", async () => {
     assert.equal(final.artifact_state, "READY");
     assert.equal(h.backend.submit_calls, 1);
     assert.equal(h.backend.output_calls, 1);
+  } finally {
+    h.storage.close();
+  }
+});
+
+test("polling persists queued and running provider states", async () => {
+  const h = createHarness();
+  try {
+    const job = await h.runner.run(h.plan, "request-progress");
+    h.backend.statuses.set(job.provider_task_id, "RUNNING");
+    const observed = await h.runner.wait(job.id, 20, 1);
+    assert.equal(observed.execution_state, "RUNNING");
+    assert.equal(observed.provider_state, "RUNNING");
+    assert.equal(h.backend.output_calls, 0);
   } finally {
     h.storage.close();
   }
@@ -455,4 +574,166 @@ test("Workflow API adapter distinguishes HTTP-200 application errors from unknow
   const uploaded = await uploadClient.upload({ asset_id: "asset", content_hash: "hash", filename: "input.png", mime: "image/png", bytes: new Uint8Array([1, 2, 3]) });
   assert.deepEqual(uploaded, { kind: "provider_file", value: "server-reference.png" });
   assert.equal(uploadBody instanceof FormData, true);
+  assert.equal(await uploadBody.get("apiKey"), "redacted-test-key");
+  assert.equal(await uploadBody.get("fileType"), "input");
+  assert.equal(uploadBody.get("file").name, "input.png");
+
+  let v2Body;
+  const v2UploadClient = new WorkflowApiClient({
+    profile_id: "http-profile",
+    base_url: "https://api.example.invalid",
+    api_key: "redacted-test-key",
+    routes: { upload_v2: "/openapi/v2/media/upload/binary", submit: "/submit", status: "/status", outputs: "/outputs" },
+    fetch_impl: async (_url, init) => {
+      v2Body = init.body;
+      return new Response(JSON.stringify({ data: { filename: "openapi/server-reference.png" } }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  const v2Uploaded = await v2UploadClient.uploadV2({ asset_id: "asset", content_hash: "hash", filename: "input.png", mime: "image/png", bytes: new Uint8Array([1, 2, 3]) });
+  assert.deepEqual(v2Uploaded, { kind: "provider_file", value: "openapi/server-reference.png" });
+  assert.equal(await v2Body.get("apiKey"), null);
+  assert.equal(await v2Body.get("fileType"), null);
+  assert.equal(v2Body.get("file").name, "input.png");
+});
+
+test("Workflow API preserves deterministic HTTP submit rejection details", async () => {
+  const rejected = new WorkflowApiClient({
+    profile_id: "http-rejection-profile",
+    base_url: "https://api.example.invalid",
+    api_key: "redacted-test-key",
+    routes: { submit: "/submit", status: "/status", outputs: "/outputs" },
+    fetch_impl: async () => new Response(JSON.stringify({ code: 400, msg: "workflowId is required" }), { status: 400, headers: { "content-type": "application/json" } }),
+  });
+  await assert.rejects(
+    () => rejected.submit({ workflow_json: "{}", plan_id: "plan" }),
+    (error) => error?.code === "PROVIDER_ERROR"
+      && error.context?.outcome === "rejected"
+      && error.context?.http_status === "400"
+      && error.context?.provider_code === "400"
+      && error.context?.provider_response === undefined
+      && error.message === "workflowId is required",
+  );
+});
+
+test("Workflow API legacy full-graph submit keeps the legacy payload", async () => {
+  let requestedUrl;
+  let requestBody;
+  const client = new WorkflowApiClient({
+    profile_id: "new-graph-profile",
+    base_url: "https://api.example.invalid",
+    api_key: "redacted-test-key",
+    routes: { submit: "/task/openapi/create", status: "/status", outputs: "/outputs" },
+    fetch_impl: async (url, init) => {
+      requestedUrl = String(url);
+      requestBody = JSON.parse(String(init.body));
+      assert.equal(init.headers.Host, "api.example.invalid");
+      return new Response(JSON.stringify({ taskId: "new-graph-task" }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const submitted = await client.submit({ workflow_json: '{"1":{"class_type":"Save","inputs":{}}}', plan_id: "new-graph-plan", workflow_id: "2097177175284154370", submit_mode: "legacy_graph" });
+  assert.equal(submitted.task_id, "new-graph-task");
+  assert.equal(new URL(requestedUrl).pathname, "/task/openapi/create");
+  assert.equal(requestBody.workflow, '{"1":{"class_type":"Save","inputs":{}}}');
+  assert.equal(requestBody.workflowId, "2097177175284154370");
+  assert.equal(requestBody.nodeInfoList, undefined);
+});
+
+test("Workflow API V2 submit uses nodeInfoList and never sends the full graph", async () => {
+  let requestedUrl;
+  let requestBody;
+  const log = [];
+  const apiKey = "secret-api-key";
+  const client = new WorkflowApiClient({
+    profile_id: "v2-profile",
+    base_url: "https://api.example.invalid",
+    api_key: apiKey,
+    routes: { submit: "/task/openapi/create", submit_v2: "/openapi/v2/run/workflow", status: "/status", outputs: "/outputs" },
+    logger: (event) => log.push(event),
+    fetch_impl: async (url, init) => {
+      requestedUrl = String(url);
+      requestBody = JSON.parse(String(init.body));
+      assert.equal(init.headers.Host, "api.example.invalid");
+      return new Response(JSON.stringify({ taskId: "v2-task" }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  const submitted = await client.submit({
+    workflow_json: '{"1":{"class_type":"LoadImage","inputs":{"image":"should-not-be-sent"}}}',
+    plan_id: "v2-plan",
+    workflow_id: "2097424727420821506",
+    node_info_list: [{ nodeId: "1", fieldName: "image", fieldValue: "api/uploaded.png" }],
+  });
+  assert.equal(submitted.task_id, "v2-task");
+  assert.equal(new URL(requestedUrl).pathname, "/openapi/v2/run/workflow/2097424727420821506");
+  assert.deepEqual(requestBody.nodeInfoList, [{ nodeId: "1", fieldName: "image", fieldValue: "api/uploaded.png" }]);
+  assert.equal(requestBody.workflow, undefined);
+  assert.equal(JSON.stringify(log).includes(apiKey), false);
+});
+
+test("Workflow API nested invalid-image response is deterministic and has no retry", async () => {
+  const client = new WorkflowApiClient({
+    profile_id: "validation-profile",
+    base_url: "https://api.example.invalid",
+    api_key: "redacted-test-key",
+    routes: { submit: "/task/openapi/create", status: "/status", outputs: "/outputs" },
+    fetch_impl: async () => new Response(JSON.stringify({ error: { message: JSON.stringify({ code: "prompt_outputs_failed_validation", message: "Invalid image file", prompt: "private-prompt" }) } }), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  await assert.rejects(
+    () => client.submit({ workflow_json: "{}", plan_id: "validation-plan" }),
+    (error) => error?.code === "PROVIDER_ERROR" && error?.recoverable === false && error?.context?.retry === "never" && /prompt_outputs_failed_validation/.test(error.message) && !error.message.includes("private-prompt"),
+  );
+});
+
+test("Workflow API rejects non-loopback HTTP bases and cross-origin routes", () => {
+  const routes = { submit: "/submit", status: "/status", outputs: "/outputs" };
+  assert.throws(
+    () => new WorkflowApiClient({ profile_id: "url-profile", base_url: "http://localhost.evil", api_key: "redacted-test-key", routes }),
+    /must be HTTPS/,
+  );
+  assert.throws(
+    () => new WorkflowApiClient({ profile_id: "url-profile", base_url: "https://api.example.invalid", api_key: "redacted-test-key", routes: { ...routes, submit: "https://evil.example/submit" } }),
+    /configured base URL/,
+  );
+});
+
+test("Workflow API submit timeout covers a response body that honors abort", async () => {
+  const client = new WorkflowApiClient({
+    profile_id: "body-timeout-profile",
+    base_url: "https://api.example.invalid",
+    api_key: "redacted-test-key",
+    timeout_ms: 10,
+    routes: { submit: "/submit", status: "/status", outputs: "/outputs" },
+    fetch_impl: async (_url, init) => ({
+      ok: true,
+      status: 200,
+      text: () => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true })),
+    }),
+  });
+  await assert.rejects(() => client.submit({ workflow_json: "{}", plan_id: "body-timeout" }), (error) => error instanceof SubmitUnknownError);
+});
+
+test("Workflow API missing taskId is failed with unknown-or-not-started charge", async () => {
+  const client = new WorkflowApiClient({
+    profile_id: "missing-task-profile",
+    base_url: "https://api.example.invalid",
+    api_key: "redacted-test-key",
+    routes: { submit: "/task/openapi/create", status: "/status", outputs: "/outputs" },
+    fetch_impl: async () => new Response(JSON.stringify({ code: 0, data: { taskStatus: "QUEUED" } }), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  await assert.rejects(
+    () => client.submit({ workflow_json: "{}", plan_id: "missing-task-plan" }),
+    (error) => error?.code === "PROVIDER_ERROR" && error?.context?.charge === "unknown_or_not_started" && error?.context?.outcome === "rejected",
+  );
+});
+
+test("Workflow API ignores output entries without a usable download URL", async () => {
+  const client = new WorkflowApiClient({
+    profile_id: "outputs-profile",
+    base_url: "https://api.example.invalid",
+    api_key: "redacted-test-key",
+    routes: { submit: "/submit", status: "/status", outputs: "/outputs" },
+    fetch_impl: async () => new Response(JSON.stringify({ data: { results: [{ id: "missing-url" }, { id: "valid", fileUrl: "https://cdn.example/output.png" }] } }), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  const output = await client.outputs("task-outputs");
+  assert.deepEqual(output.outputs, [{ id: "valid", url: "https://cdn.example/output.png" }]);
 });

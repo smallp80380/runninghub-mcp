@@ -1,5 +1,8 @@
 node_modules/
 dist/
+!/rhcomfy-mcp/
+!/rhcomfy-mcp/dist/
+!/rhcomfy-mcp/dist/**
 .tmp/
 *.sqlite
 *.sqlite-shm

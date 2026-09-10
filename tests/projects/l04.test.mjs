@@ -58,6 +58,31 @@ test("two projects resolve the same 02B alias without mixing assets", () => {
   }
 });
 
+test("project reindex preserves registered asset roles and document index", () => {
+  const root = createProjectRoot("runninghub-project-reindex-");
+  const storage = new Storage(":memory:");
+  const context = new ProjectContextService(storage);
+  try {
+    context.registerProject({
+      project_id: "project-reindex",
+      canonical_root: root,
+      backend_profile_id: "synthetic-basic",
+      document_paths: ["plan.md"],
+      asset_roots: ["assets"],
+      output_root: "outputs",
+    });
+    context.registerAsset("project-reindex", "assets/character.png", ["character"]);
+
+    const indexed = context.indexProject("project-reindex");
+    const character = indexed.assets.find((asset) => asset.relative_path === "assets/character.png");
+    assert.equal(indexed.documents.length, 1);
+    assert.deepEqual(character?.roles, ["character"]);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("asset hash changes invalidate the old path binding and missing roles are explicit", () => {
   const root = createProjectRoot("runninghub-project-change-");
   const storage = new Storage(":memory:");
@@ -99,6 +124,16 @@ test("ambiguous aliases and hard workflow constraints are not guessed away", () 
   assert.ok(reference.rejected.some((item) => item.workflow_id === "synthetic-text-to-image-v1"));
   const video = library.search({ output_kind: "video", required_roles: ["first_frame"], backend_profile_id: "synthetic-basic" });
   assert.deepEqual(video.selected.map((card) => card.workflow_id), ["synthetic-image-to-video-v1"]);
+});
+
+test("missing project is reported before scene resolution", () => {
+  const storage = new Storage(":memory:");
+  const context = new ProjectContextService(storage);
+  try {
+    assert.throws(() => context.resolveScene("missing-project", "02b"), /Project missing-project was not found/);
+  } finally {
+    storage.close();
+  }
 });
 
 test("project workflow discovery finds API JSON without treating assets or plans as workflows", () => {

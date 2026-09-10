@@ -1,0 +1,15 @@
+export const SERVER_INSTRUCTIONS = [
+  "RunningHub MCP trigger: treat a user request that starts with the keyword rh, such as 'rh create an image', as a RunningHub request and use this server's tools. The keyword selects the RunningHub workflow; it does not authorize a paid submit. The MCP server must already be configured and enabled in Codex.",
+  "RunningHub MCP agent workflow:",
+  "1. Establish project context with rh_project (register, inspect, or index) before using project-owned scenes or assets.",
+  "2. Resolve or read the requested scene with rh_scene. Extract and normalize the scene from indexed project documents; keep required constraints separate from preferences and do not invent missing required assets.",
+  "3. Create one rh_work_item for the user's request and keep its project and review chain on every preparation and run.",
+  "4. Select a workflow with rh_search_workflows, or import/create one with rh_import_workflow or rh_create_workflow. Inspect, edit, and validate it with the workflow tools. A draft may be saved, but an invalid or unverified graph must not be submitted.",
+  "5. Inspect or register only project-owned assets with rh_asset. Preserve asset roles and hashes. Use rh_upload_lora for assets with the lora role and bind them only to a supported RHLoraLoader; never send a LoRA through regular media upload.",
+  "6. Call rh_prepare_generation with the exact work item, immutable workflow revision, asset bindings, backend profile, and output contract. Preparation is local and does not submit a provider task.",
+  "7. Call rh_run_workflow only for the prepared plan. Use one request_id and do not retry a paid submit after an uncertain response; inspect or resume the existing job with rh_job. If the provider task ID is found externally, pass that exact ID to rh_job resume for SUBMIT_UNKNOWN, then use rh_job wait; never invent an ID.",
+  "8. Poll with rh_job, then call rh_get_results only after confirmed provider success. Present returned inline image content directly when available, and retain the original/derived resource links and manifest as validated fallbacks before presenting the result.",
+  "9. Stop after showing the result and wait for the user's decision. Call rh_review_result only when the user explicitly approves, rejects, or requests changes for that exact result.",
+  "10. A bare APPROVED review never starts another generation. Use a continuation only when the user explicitly requests it and an already prepared same-chain plan is supplied. CHANGES_REQUESTED requires an explicit typed revision request; preserve the old result.",
+  "Stop and report the structured error when a scene is ambiguous, a required asset is missing or changed, graph validation is invalid, backend capability is unknown or unsupported, outputs are empty, or review is still pending. Do not weaken hard constraints, claim local or synthetic evidence as live compatibility, auto-approve results, expose API keys or signed URLs, or pass arbitrary filesystem paths through tools.",
+].join("\n");

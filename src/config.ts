@@ -6,9 +6,13 @@ export const RUNNINGHUB_WORKFLOW_PROFILE_ID = "runninghub";
 export const RUNNINGHUB_WORKFLOW_API_BASE_URL = "https://www.runninghub.ai";
 export const RUNNINGHUB_WORKFLOW_API_ROUTES: WorkflowApiRoutes = {
   submit: "/task/openapi/create",
+  submit_v2: "/openapi/v2/run/workflow",
+  workflow_json: "/api/openapi/getJsonApiFormat",
   status: "/openapi/v2/query",
   outputs: "/openapi/v2/query",
-  upload: "/openapi/v2/media/upload/binary",
+  upload: "/task/openapi/upload",
+  upload_legacy: "/task/openapi/upload",
+  upload_v2: "/openapi/v2/media/upload/binary",
   lora_upload_url: "/api/openapi/getLoraUploadUrl",
   cancel: "/task/openapi/cancel",
 };
@@ -18,6 +22,7 @@ export interface AppConfig {
   readonly dbPath: string;
   readonly catalogDir: string;
   readonly profileId: string;
+  readonly live_cases_configured: boolean;
   readonly projectRoot?: string;
   readonly workflowApi?: {
     readonly profile_id: string;
@@ -53,6 +58,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     dbPath,
     catalogDir,
     profileId,
+    live_cases_configured: Boolean(env.RUNNINGHUB_LIVE_CASES?.trim()),
     ...(projectRoot ? { projectRoot } : {}),
     ...(workflowApi ? { workflowApi } : {}),
   };

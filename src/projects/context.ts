@@ -250,6 +250,7 @@ export class ProjectContextService {
 
   indexProject(projectId: string): { project: ProjectRecord; documents: readonly DocumentIndex[]; assets: readonly AssetRecord[] } {
     const project = this.getProject(projectId);
+    const existingAssetsByPath = new Map(this.storage.listAssets(projectId).map((asset) => [asset.relative_path, asset]));
     const documents = project.document_paths.map((path) => {
       const absolute = ensureInside(project.canonical_root, path);
       const bytes = readFileSync(absolute);
@@ -259,7 +260,10 @@ export class ProjectContextService {
     const assets: AssetRecord[] = [];
     for (const assetRoot of project.asset_roots) {
       for (const absolute of walkFiles(ensureInside(project.canonical_root, assetRoot))) {
-        assets.push(this.registerAsset(projectId, portablePath(relative(project.canonical_root, absolute)), []));
+        const relativePath = portablePath(relative(project.canonical_root, absolute));
+        const existing = existingAssetsByPath.get(relativePath);
+        const roles = existing ? JSON.parse(existing.roles_json) as string[] : [];
+        assets.push(this.registerAsset(projectId, relativePath, roles, existing?.source ?? "project"));
       }
     }
     const now = new Date().toISOString();
@@ -322,8 +326,7 @@ export class ProjectContextService {
     for (const absolute of walkFiles(project.canonical_root)) {
       if (extname(absolute).toLowerCase() !== ".json") continue;
       const relativePath = portablePath(relative(project.canonical_root, absolute));
-      const firstSegment = relativePath.split("/")[0] ?? "";
-      if (excludedRoots.has(firstSegment) || relativePath.startsWith(".runninghub/")) continue;
+      if ([...excludedRoots].some((root) => relativePath === root || relativePath.startsWith(`${root}/`))) continue;
       try {
         const graph = importApiGraph(readFileSync(absolute, "utf8"));
         candidates.push({ relative_path: relativePath, graph_hash: hashGraph(graph), ...(workflowIdHint(relativePath) ? { workflow_id_hint: workflowIdHint(relativePath) } : {}) });
@@ -334,7 +337,7 @@ export class ProjectContextService {
     return candidates.sort((left, right) => left.relative_path.localeCompare(right.relative_path));
   }
 
-  readWorkflowFile(projectId: string, relativePath: string): WorkflowSource {
+  readWorkflowFile(projectId: string, relativePath: string, outputNodes: readonly string[] = []): WorkflowSource {
     const project = this.getProject(projectId);
     const absolute = ensureInside(project.canonical_root, portablePath(relativePath));
     if (!existsSync(absolute) || !lstatSync(absolute).isFile()) throw new AppError("ASSET_MISSING", `Workflow file ${relativePath} does not exist.`, { recoverable: true });
@@ -342,7 +345,7 @@ export class ProjectContextService {
     const realRelative = relative(project.canonical_root, real);
     if (realRelative.startsWith(`..${sep}`) || realRelative === "..") throw new AppError("ASSET_MISSING", `Workflow file ${relativePath} escapes the project root.`, { recoverable: true });
     const apiGraph = readFileSync(real, "utf8");
-    const graph = importApiGraph(apiGraph);
+    const graph = importApiGraph(apiGraph, outputNodes);
     const storedPath = portablePath(relative(project.canonical_root, real));
     return { relative_path: storedPath, api_graph: apiGraph, graph_hash: hashGraph(graph), ...(workflowIdHint(storedPath) ? { workflow_id_hint: workflowIdHint(storedPath) } : {}) };
   }
@@ -378,13 +381,17 @@ export class ProjectContextService {
   }
 
   resolveScene(projectId: string, alias: string): { scene: SceneRecord; assets: readonly AssetRecord[] } {
+    this.getProject(projectId);
     const candidates = this.storage.listScenes(projectId).map(sceneFromRow).filter((scene) => [scene.scene_id, ...scene.aliases].some((value) => normalizeAlias(value) === normalizeAlias(alias)));
     if (candidates.length === 0) throw new AppError("SCENE_AMBIGUOUS", `No scene matches ${alias} in project ${projectId}.`, { recoverable: true, suggestedFix: "Use rh_scene read/list to inspect registered scene IDs and aliases." });
     if (candidates.length > 1) throw new AppError("SCENE_AMBIGUOUS", `Alias ${alias} matches multiple scenes: ${candidates.map((scene) => scene.scene_id).join(", ")}.`, { recoverable: true });
     const scene = candidates[0];
     if (!scene) throw new Error("Scene candidate unexpectedly missing");
     const assets = this.listAssets(projectId);
-    const required = scene.required_asset_roles.map((role) => assets.filter((asset) => asset.roles.includes(role)));
+    const required = scene.required_asset_roles.map((role) => {
+      const normalizedRole = role.trim().toLowerCase();
+      return assets.filter((asset) => asset.roles.some((candidate) => candidate.trim().toLowerCase() === normalizedRole));
+    });
     for (const roleAssets of required) {
       const byPath = new Map<string, AssetRecord[]>();
       for (const asset of roleAssets) byPath.set(asset.relative_path, [...(byPath.get(asset.relative_path) ?? []), asset]);

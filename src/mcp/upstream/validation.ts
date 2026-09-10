@@ -9,7 +9,7 @@ export function validatePayload(model: ModelDefinition, payload: Record<string, 
 
   for (const param of model.params) {
     const value = payload[param.fieldKey];
-    if (param.required && isMissing(value)) {
+    if (param.required && (isMissing(value) || (Array.isArray(value) && value.length === 0))) {
       errors.push(`Missing required parameter: ${param.fieldKey}`);
       continue;
     }
@@ -47,14 +47,18 @@ function validateParamValue(param: ModelParam, value: unknown, errors: string[])
       }
       break;
     case "INT":
-      if (!Number.isInteger(value)) {
+      if (!Number.isSafeInteger(value)) {
         errors.push(`Invalid integer for ${param.fieldKey}: ${String(value)}`);
+        break;
       }
+      validateNumericBounds(param, value as number, errors);
       break;
     case "FLOAT":
-      if (typeof value !== "number" || Number.isNaN(value)) {
+      if (typeof value !== "number" || !Number.isFinite(value)) {
         errors.push(`Invalid number for ${param.fieldKey}: ${String(value)}`);
+        break;
       }
+      validateNumericBounds(param, value, errors);
       break;
     case "IMAGE":
     case "VIDEO":
@@ -64,10 +68,28 @@ function validateParamValue(param: ModelParam, value: unknown, errors: string[])
     case "STRING":
       if (typeof value !== "string") {
         errors.push(`Invalid string for ${param.fieldKey}: got ${typeof value}`);
+      } else if (param.maxLength !== undefined && value.length > param.maxLength) {
+        errors.push(`String too long for ${param.fieldKey}: maximum length is ${param.maxLength}`);
       }
       break;
     default:
       break;
+  }
+}
+
+function validateNumericBounds(param: ModelParam, value: number, errors: string[]) {
+  if (param.min !== undefined && value < param.min) {
+    errors.push(`Value below minimum for ${param.fieldKey}: ${String(value)} < ${String(param.min)}`);
+  }
+  if (param.max !== undefined && value > param.max) {
+    errors.push(`Value above maximum for ${param.fieldKey}: ${String(value)} > ${String(param.max)}`);
+  }
+  if (param.step !== undefined && param.step > 0) {
+    const origin = param.min ?? 0;
+    const steps = (value - origin) / param.step;
+    if (Math.abs(steps - Math.round(steps)) > 1e-9) {
+      errors.push(`Invalid step for ${param.fieldKey}: expected increments of ${String(param.step)}`);
+    }
   }
 }
 

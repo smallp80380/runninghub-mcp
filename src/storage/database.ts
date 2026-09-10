@@ -4,6 +4,12 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { AppError } from "../errors.js";
 
+function cacheExpired(expiresAt: string | null | undefined, now: Date): boolean {
+  if (!expiresAt) return false;
+  const timestamp = Date.parse(expiresAt);
+  return !Number.isFinite(timestamp) || timestamp <= now.getTime();
+}
+
 const MIGRATIONS = [
   {
     id: 1,
@@ -241,6 +247,31 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    id: 9,
+    sql: `
+      ALTER TABLE provider_uploads ADD COLUMN expires_at TEXT;
+      ALTER TABLE lora_uploads ADD COLUMN expires_at TEXT;
+    `,
+  },
+  {
+    id: 10,
+    sql: `
+      ALTER TABLE execution_plans ADD COLUMN workflow_state TEXT NOT NULL DEFAULT 'uninitialized';
+    `,
+  },
+  {
+    id: 11,
+    sql: `
+      ALTER TABLE jobs ADD COLUMN charge_status TEXT NOT NULL DEFAULT 'unknown_or_not_started';
+    `,
+  },
+  {
+    id: 12,
+    sql: `
+      ALTER TABLE execution_plans ADD COLUMN provider_submit_mode TEXT;
+    `,
+  },
 ] as const;
 
 export interface WorkflowRevisionRow {
@@ -310,6 +341,7 @@ export interface ProviderUploadRow {
   readonly mime: string;
   readonly provider_kind: string;
   readonly provider_value: string;
+  readonly expires_at: string | null;
   readonly created_at: string;
   readonly updated_at: string;
 }
@@ -321,6 +353,7 @@ export interface LoraUploadRow {
   readonly content_hash: string;
   readonly provider_kind: string;
   readonly provider_value: string;
+  readonly expires_at: string | null;
   readonly created_at: string;
   readonly updated_at: string;
 }
@@ -351,6 +384,8 @@ export interface ExecutionPlanRow {
   readonly policy_hash: string;
   readonly backend_profile_id: string;
   readonly provider_workflow_id: string | null;
+  readonly provider_submit_mode: string | null;
+  readonly workflow_state: string;
   readonly output_contract_json: string;
   readonly mode: string;
   readonly project_id: string;
@@ -367,6 +402,7 @@ export interface JobRow {
   readonly artifact_state: string;
   readonly provider_task_id: string | null;
   readonly submit_intent: string | null;
+  readonly charge_status: string;
   readonly attempts: number;
   readonly created_at: string;
   readonly updated_at: string;
@@ -566,42 +602,62 @@ export class Storage {
     return this.db.prepare("SELECT * FROM assets WHERE project_id = ? AND id = ?").get(projectId, assetId) as unknown as AssetRow | undefined;
   }
 
-  getProviderUpload(profileId: string, apiFamily: string, assetId: string, contentHash: string): ProviderUploadRow | undefined {
-    return this.db
+  getProviderUpload(profileId: string, apiFamily: string, assetId: string, contentHash: string, now = new Date()): ProviderUploadRow | undefined {
+    const row = this.db
       .prepare("SELECT * FROM provider_uploads WHERE profile_id = ? AND api_family = ? AND asset_id = ? AND content_hash = ?")
       .get(profileId, apiFamily, assetId, contentHash) as unknown as ProviderUploadRow | undefined;
+    if (!row) return undefined;
+    if (cacheExpired(row.expires_at, now)) {
+      this.invalidateProviderUpload(profileId, apiFamily, assetId, contentHash);
+      return undefined;
+    }
+    return row;
   }
 
   saveProviderUpload(row: ProviderUploadRow): ProviderUploadRow {
     this.db
       .prepare(
         `INSERT OR IGNORE INTO provider_uploads
-          (profile_id, api_family, asset_id, content_hash, mime, provider_kind, provider_value, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (profile_id, api_family, asset_id, content_hash, mime, provider_kind, provider_value, expires_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.profile_id, row.api_family, row.asset_id, row.content_hash, row.mime, row.provider_kind, row.provider_value, row.created_at, row.updated_at);
+      .run(row.profile_id, row.api_family, row.asset_id, row.content_hash, row.mime, row.provider_kind, row.provider_value, row.expires_at ?? null, row.created_at, row.updated_at);
     const stored = this.getProviderUpload(row.profile_id, row.api_family, row.asset_id, row.content_hash);
     if (!stored) throw new Error(`Provider upload ${row.asset_id} was not persisted`);
     return stored;
   }
 
-  getLoraUpload(profileId: string, apiFamily: string, contentHash: string): LoraUploadRow | undefined {
-    return this.db
+  invalidateProviderUpload(profileId: string, apiFamily: string, assetId: string, contentHash: string): void {
+    this.db.prepare("DELETE FROM provider_uploads WHERE profile_id = ? AND api_family = ? AND asset_id = ? AND content_hash = ?").run(profileId, apiFamily, assetId, contentHash);
+  }
+
+  getLoraUpload(profileId: string, apiFamily: string, contentHash: string, now = new Date()): LoraUploadRow | undefined {
+    const row = this.db
       .prepare("SELECT * FROM lora_uploads WHERE profile_id = ? AND api_family = ? AND content_hash = ?")
       .get(profileId, apiFamily, contentHash) as unknown as LoraUploadRow | undefined;
+    if (!row) return undefined;
+    if (cacheExpired(row.expires_at, now)) {
+      this.invalidateLoraUpload(profileId, apiFamily, contentHash);
+      return undefined;
+    }
+    return row;
   }
 
   saveLoraUpload(row: LoraUploadRow): LoraUploadRow {
     this.db
       .prepare(
         `INSERT OR IGNORE INTO lora_uploads
-          (profile_id, api_family, asset_id, content_hash, provider_kind, provider_value, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          (profile_id, api_family, asset_id, content_hash, provider_kind, provider_value, expires_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.profile_id, row.api_family, row.asset_id, row.content_hash, row.provider_kind, row.provider_value, row.created_at, row.updated_at);
+      .run(row.profile_id, row.api_family, row.asset_id, row.content_hash, row.provider_kind, row.provider_value, row.expires_at ?? null, row.created_at, row.updated_at);
     const stored = this.getLoraUpload(row.profile_id, row.api_family, row.content_hash);
     if (!stored) throw new Error(`LoRA upload ${row.asset_id} was not persisted`);
     return stored;
+  }
+
+  invalidateLoraUpload(profileId: string, apiFamily: string, contentHash: string): void {
+    this.db.prepare("DELETE FROM lora_uploads WHERE profile_id = ? AND api_family = ? AND content_hash = ?").run(profileId, apiFamily, contentHash);
   }
 
   saveWorkItem(row: WorkItemRow): void {
@@ -628,10 +684,14 @@ export class Storage {
       .prepare(
         `INSERT INTO execution_plans
           (id, work_item_id, schema_version, graph_revision_id, graph_hash, workflow_json, asset_bindings_json,
-           requirements_hash, policy_hash, backend_profile_id, provider_workflow_id, output_contract_json, mode, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           requirements_hash, policy_hash, backend_profile_id, provider_workflow_id, provider_submit_mode, workflow_state, output_contract_json, mode, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.id, row.work_item_id, row.schema_version, row.graph_revision_id, row.graph_hash, row.workflow_json, row.asset_bindings_json, row.requirements_hash, row.policy_hash, row.backend_profile_id, row.provider_workflow_id, row.output_contract_json, row.mode, row.created_at);
+      .run(row.id, row.work_item_id, row.schema_version, row.graph_revision_id, row.graph_hash, row.workflow_json, row.asset_bindings_json, row.requirements_hash, row.policy_hash, row.backend_profile_id, row.provider_workflow_id, row.provider_submit_mode, row.workflow_state, row.output_contract_json, row.mode, row.created_at);
+  }
+
+  updateExecutionPlanWorkflowState(id: string, state: "uninitialized" | "ready" | "failed_validation"): void {
+    this.db.prepare("UPDATE execution_plans SET workflow_state = ? WHERE id = ?").run(state, id);
   }
 
   getExecutionPlan(id: string): ExecutionPlanRow | undefined {
@@ -758,11 +818,16 @@ export class Storage {
   }
 
   markSubmitUnknown(jobId: string): void {
-    this.db.prepare("UPDATE jobs SET execution_state = 'SUBMIT_UNKNOWN', provider_state = 'UNKNOWN', updated_at = ? WHERE id = ?").run(new Date().toISOString(), jobId);
+    this.db.prepare("UPDATE jobs SET execution_state = 'SUBMIT_UNKNOWN', provider_state = 'UNKNOWN', charge_status = 'unknown', updated_at = ? WHERE id = ? AND provider_task_id IS NULL AND execution_state IN ('SUBMITTING', 'SUBMIT_UNKNOWN')").run(new Date().toISOString(), jobId);
   }
 
   recordProviderTask(jobId: string, taskId: string): void {
     this.db.prepare("UPDATE jobs SET execution_state = 'RUNNING', provider_state = 'QUEUED', provider_task_id = ?, updated_at = ? WHERE id = ? AND provider_task_id IS NULL").run(taskId, new Date().toISOString(), jobId);
+  }
+
+  attachProviderTask(jobId: string, taskId: string): boolean {
+    const result = this.db.prepare("UPDATE jobs SET execution_state = 'RUNNING', provider_state = 'QUEUED', provider_task_id = ?, updated_at = ? WHERE id = ? AND execution_state = 'SUBMIT_UNKNOWN' AND provider_task_id IS NULL").run(taskId, new Date().toISOString(), jobId);
+    return Number(result.changes) === 1;
   }
 
   markProviderStatus(jobId: string, status: "QUEUED" | "RUNNING" | "SUCCESS" | "FAILED" | "CANCEL", artifactState?: string): void {
@@ -918,7 +983,7 @@ export class Storage {
   }
 
   cancelLocalJob(jobId: string): void {
-    this.db.prepare("UPDATE jobs SET execution_state = 'CANCELLED', provider_state = 'CANCELLED', updated_at = ? WHERE id = ? AND provider_task_id IS NULL AND execution_state IN ('READY', 'SUBMITTING', 'SUBMIT_UNKNOWN')").run(new Date().toISOString(), jobId);
+    this.db.prepare("UPDATE jobs SET execution_state = 'CANCELLED', provider_state = 'CANCELLED', updated_at = ? WHERE id = ? AND provider_task_id IS NULL AND execution_state = 'READY'").run(new Date().toISOString(), jobId);
   }
 
   listRecoverableJobs(): JobRow[] {

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { AppError } from "../errors.js";
 import { Storage, type JobRow, type ProjectRow, type ResultRow } from "../storage/database.js";
@@ -34,6 +35,41 @@ function sha256(bytes: Uint8Array): string {
 function textMime(value: string | null | undefined): string | undefined {
   const mime = value?.split(";", 1)[0]?.trim().toLowerCase();
   return mime && mime !== "application/octet-stream" ? mime : undefined;
+}
+
+function normalizedHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+}
+
+function isPrivateOutputHost(hostname: string): boolean {
+  const host = normalizedHostname(hostname);
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) return true;
+  const version = isIP(host);
+  if (version === 4) {
+    const octets = host.split(".").map(Number);
+    const first = octets[0] ?? -1;
+    const second = octets[1] ?? -1;
+    return first === 0 || first === 10 || first === 127 || (first === 169 && second === 254)
+      || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
+  }
+  if (version === 6) {
+    return host === "::1" || host === "::" || /^f[cd]/i.test(host) || /^fe[89ab]/i.test(host)
+      || host.startsWith("::ffff:127.") || host.startsWith("::ffff:10.") || host.startsWith("::ffff:192.168.");
+  }
+  return false;
+}
+
+function isAllowedOutputUrl(url: URL): boolean {
+  const host = normalizedHostname(url.hostname);
+  const loopback = host === "localhost" || host === "127.0.0.1" || host === "::1";
+  if (url.username || url.password) return false;
+  if (url.protocol === "http:") return loopback;
+  return url.protocol === "https:" && !isPrivateOutputHost(host);
+}
+
+function safeDownloadError(value: unknown, fallback: string): string {
+  if (!(value instanceof Error) || !value.message.trim()) return fallback;
+  return value.message.trim().replace(/https?:\/\/[^\s"']+/gi, "[REDACTED_URL]").slice(0, 1000);
 }
 
 function uint32Be(bytes: Uint8Array, offset: number): number {
@@ -250,17 +286,22 @@ export class ResultDownloadService {
     } catch {
       throw new AppError("DOWNLOAD_FAILED", `Provider output ${output.id} has an invalid download URL.`, { recoverable: true });
     }
-    if (source.protocol !== "https:" && !(source.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(source.hostname))) {
+    if (!isAllowedOutputUrl(source)) {
       throw new AppError("DOWNLOAD_FAILED", `Provider output ${output.id} uses a disallowed download URL scheme or host.`, { recoverable: true });
     }
     let response: Response;
     try {
-      response = await this.fetchImpl(source, { method: "GET", redirect: "follow", headers: { Accept: "*/*" } });
+      response = await this.fetchImpl(source, { method: "GET", redirect: "error", headers: { Accept: "*/*" } });
     } catch (error) {
-      throw new AppError("DOWNLOAD_FAILED", error instanceof Error ? error.message : "Provider output download failed.", { recoverable: true });
+      throw new AppError("DOWNLOAD_FAILED", safeDownloadError(error, "Provider output download failed."), { recoverable: true });
     }
-    const finalUrl = response.url ? new URL(response.url) : source;
-    if (finalUrl.protocol !== "https:" && !(finalUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(finalUrl.hostname))) {
+    let finalUrl: URL;
+    try {
+      finalUrl = response.url ? new URL(response.url) : source;
+    } catch {
+      throw new AppError("DOWNLOAD_FAILED", `Provider output ${output.id} returned an invalid final URL.`, { recoverable: true });
+    }
+    if (!isAllowedOutputUrl(finalUrl)) {
       throw new AppError("DOWNLOAD_FAILED", `Provider output ${output.id} redirected to a disallowed URL.`, { recoverable: true });
     }
     if (!response.ok) throw new AppError("DOWNLOAD_FAILED", `Provider output ${output.id} returned HTTP ${response.status}.`, { recoverable: true });
@@ -273,7 +314,7 @@ export class ResultDownloadService {
       return { bytes, ...(responseMime ? { responseMime } : {}) };
     } catch (error) {
       if (error instanceof AppError) throw error;
-      throw new AppError("DOWNLOAD_FAILED", error instanceof Error ? error.message : "Provider output body could not be read.", { recoverable: true });
+      throw new AppError("DOWNLOAD_FAILED", safeDownloadError(error, "Provider output body could not be read."), { recoverable: true });
     }
   }
 }
