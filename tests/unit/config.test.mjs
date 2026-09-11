@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { loadConfig } from "../../dist/config.js";
+import { getRunningHubLiveCases, loadConfig, RUNNINGHUB_LIVE_CASES_DEFAULT } from "../../dist/config.js";
+
+test("Live cases default to full and normalize explicit overrides", () => {
+  assert.equal(RUNNINGHUB_LIVE_CASES_DEFAULT, "full");
+  assert.equal(getRunningHubLiveCases({}), "full");
+  assert.equal(getRunningHubLiveCases({ RUNNINGHUB_LIVE_CASES: " LIMITED " }), "limited");
+});
 
 test("Workflow API uses built-in official routes and only reads the API key", () => {
   const config = loadConfig({
@@ -34,4 +40,5 @@ test("Workflow API uses built-in official routes and only reads the API key", ()
 test("Workflow API stays unavailable without the API key", () => {
   const config = loadConfig({});
   assert.equal(config.workflowApi, undefined);
+  assert.equal(config.live_cases_configured, true);
 });

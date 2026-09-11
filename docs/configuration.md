@@ -11,7 +11,7 @@ The agent tool sequence and stop conditions are documented in [`agent-workflow.m
 | `RUNNINGHUB_CATALOG_DIR` | `<working directory>/data/upstream` | Pinned public catalog snapshot |
 | `RUNNINGHUB_PROJECT_ROOT` | unset | Reserved project root for later packages |
 | `RUNNINGHUB_FFMPEG_PATH` | `ffmpeg` on `PATH` | Local executable used for image previews and video posters |
-| `RUNNINGHUB_LIVE_CASES` | unset | Boolean capability evidence only; `full` is required by the explicit live harness |
+| `RUNNINGHUB_LIVE_CASES` | `full` | Boolean capability evidence only; `full` is the default and is required by the explicit live harness |
 
 The execution runner applies the local `runninghub-workflow-media-v1` profile before any upload or provider submit: up to four image references, one grayscale PNG mask with optional alpha, one video input, and six media inputs total. Alpha is preserved in accepted image bytes; JPEG EXIF orientation other than 1 is rejected rather than silently rotated. These are local supported-profile rules and do not establish account-wide RunningHub limits.
 
@@ -44,4 +44,4 @@ $env:RUNNINGHUB_DATA_DIR = Join-Path $PWD ".tmp\runninghub-data"
 npm.cmd start
 ```
 
-Do not send keys, signed URLs, private payloads, or arbitrary filesystem paths through MCP tools. Live testing is opt-in and requires `RUNNINGHUB_LIVE_CASES=full`; it must not persist the acceptance workflow in a project.
+Do not send keys, signed URLs, private payloads, or arbitrary filesystem paths through MCP tools. Live testing is opt-in and uses `RUNNINGHUB_LIVE_CASES=full` by default; it must not persist the acceptance workflow in a project.

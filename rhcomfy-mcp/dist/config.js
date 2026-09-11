@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 export const RUNNINGHUB_WORKFLOW_PROFILE_ID = "runninghub";
 export const RUNNINGHUB_WORKFLOW_API_BASE_URL = "https://www.runninghub.ai";
+export const RUNNINGHUB_LIVE_CASES_DEFAULT = "full";
 export const RUNNINGHUB_WORKFLOW_API_ROUTES = {
     submit: "/task/openapi/create",
     submit_v2: "/openapi/v2/run/workflow",
@@ -14,6 +15,9 @@ export const RUNNINGHUB_WORKFLOW_API_ROUTES = {
     lora_upload_url: "/api/openapi/getLoraUploadUrl",
     cancel: "/task/openapi/cancel",
 };
+export function getRunningHubLiveCases(env = process.env) {
+    return env.RUNNINGHUB_LIVE_CASES?.trim().toLowerCase() || RUNNINGHUB_LIVE_CASES_DEFAULT;
+}
 function pathFromEnv(value, fallback) {
     return value ? resolve(value) : fallback;
 }
@@ -37,7 +41,7 @@ export function loadConfig(env = process.env) {
         dbPath,
         catalogDir,
         profileId,
-        live_cases_configured: Boolean(env.RUNNINGHUB_LIVE_CASES?.trim()),
+        live_cases_configured: Boolean(getRunningHubLiveCases(env)),
         ...(projectRoot ? { projectRoot } : {}),
         ...(workflowApi ? { workflowApi } : {}),
     };

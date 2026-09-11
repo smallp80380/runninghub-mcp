@@ -4,6 +4,7 @@ import type { WorkflowApiRoutes } from "./backends/workflow-api/client.js";
 
 export const RUNNINGHUB_WORKFLOW_PROFILE_ID = "runninghub";
 export const RUNNINGHUB_WORKFLOW_API_BASE_URL = "https://www.runninghub.ai";
+export const RUNNINGHUB_LIVE_CASES_DEFAULT = "full";
 export const RUNNINGHUB_WORKFLOW_API_ROUTES: WorkflowApiRoutes = {
   submit: "/task/openapi/create",
   submit_v2: "/openapi/v2/run/workflow",
@@ -32,6 +33,10 @@ export interface AppConfig {
   };
 }
 
+export function getRunningHubLiveCases(env: NodeJS.ProcessEnv = process.env): string {
+  return env.RUNNINGHUB_LIVE_CASES?.trim().toLowerCase() || RUNNINGHUB_LIVE_CASES_DEFAULT;
+}
+
 function pathFromEnv(value: string | undefined, fallback: string): string {
   return value ? resolve(value) : fallback;
 }
@@ -58,7 +63,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     dbPath,
     catalogDir,
     profileId,
-    live_cases_configured: Boolean(env.RUNNINGHUB_LIVE_CASES?.trim()),
+    live_cases_configured: Boolean(getRunningHubLiveCases(env)),
     ...(projectRoot ? { projectRoot } : {}),
     ...(workflowApi ? { workflowApi } : {}),
   };

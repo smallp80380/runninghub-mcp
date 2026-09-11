@@ -15,9 +15,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/mcp/server.js";
 import { createEmptyGraph } from "../dist/graph/types.js";
+import { getRunningHubLiveCases } from "../dist/config.js";
 
 const apiKey = process.env.RUNNINGHUB_WORKFLOW_API_KEY?.trim();
-const liveCases = process.env.RUNNINGHUB_LIVE_CASES?.trim().toLowerCase();
+const liveCases = getRunningHubLiveCases();
 const workflowId = argumentValue("--workflow-id");
 const taskId = argumentValue("--task-id");
 const uploadOnly = process.argv.includes("--upload-only");
@@ -34,7 +35,7 @@ const durationSeconds = durationSecondsArgument === undefined ? undefined : Numb
 const timeoutMs = Number(argumentValue("--timeout-ms") ?? "180000");
 
 if (!apiKey || liveCases !== "full") {
-  console.error("NOT_RUN: configure RUNNINGHUB_WORKFLOW_API_KEY and RUNNINGHUB_LIVE_CASES=full before live tests.");
+  console.error("NOT_RUN: configure RUNNINGHUB_WORKFLOW_API_KEY and leave RUNNINGHUB_LIVE_CASES at its default full before live tests.");
   process.exitCode = 2;
 } else if (uploadOnly && (taskId || workflowId)) {
   console.error("NOT_RUN: --upload-only cannot be combined with --task-id or --workflow-id.");
